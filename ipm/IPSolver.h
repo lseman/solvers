@@ -171,16 +171,37 @@ private:
     void factorizeMatrix(const Eigen::SparseMatrix<double, Eigen::ColMajor, int>
                              &matrix) override {
       try {
-        // Build supernode ranges (simple: each column is a supernode)
+        // Build supernodes via pattern merging (group consecutive columns
+        // with overlapping row patterns into dense frontal matrices)
         std::vector<std::pair<int, int>> supernode_ranges;
-        for (int i = 0; i < matrix.cols(); ++i) {
-          supernode_ranges.push_back({i, i});
-        }
-        // Build column-to-supernode map
         std::vector<int> col2sn(matrix.cols());
-        for (int i = 0; i < matrix.cols(); ++i) col2sn[i] = i;
-        // Build elimination tree (simple: sequential)
+        int sn_id = 0;
+
+        int start_col = 0;
+        for (int j = 1; j <= matrix.cols(); ++j) {
+          bool should_merge = false;
+          if (j < matrix.cols()) {
+            // Heuristic: merge if column density is high and consecutive
+            // (in production: use AMD graph + elimination tree)
+            int nnz_j = matrix.innerVector(j).nonZeros();
+            int nnz_prev = matrix.innerVector(j - 1).nonZeros();
+            should_merge = (nnz_j > 3 && nnz_prev > 3);
+          }
+
+          if (!should_merge || j == matrix.cols()) {
+            int end_col = (j == matrix.cols()) ? j - 1 : j - 1;
+            supernode_ranges.push_back({start_col, end_col});
+            for (int k = start_col; k <= end_col; ++k) col2sn[k] = sn_id;
+            sn_id++;
+            if (j < matrix.cols()) start_col = j;
+          }
+        }
+
+        // Build elimination tree (simple: parent is next supernode)
         std::vector<int> etree(matrix.cols(), -1);
+        for (int j = 0; j < matrix.cols() - 1; ++j) {
+          etree[j] = j + 1;
+        }
 
         ldlt = schur_frontal::build_and_factor_frontal(matrix, supernode_ranges, col2sn, etree);
         info_code = ldlt.factorized ? 0 : 1;
