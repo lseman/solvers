@@ -1,3 +1,23 @@
+/// piqp.h — Proximal Interior-Point Quadratic Program (PIQP) Solver
+///
+/// Interior-point method for convex QPs with robustness enhancements
+/// via proximal-center updates. Suitable for small-to-medium-scale problems.
+///
+/// Problem form:
+///   minimize  ½ x'Px + q'x
+///   s.t.      Ax = b  (equality constraints)
+///             Gx ≤ h  (inequality constraints)
+///
+/// Features:
+///   - Predictor-corrector step with centrality correction (sigma)
+///   - Proximal-center updates for improved robustness
+///   - Fraction-to-boundary rule with margin (tau ≈ 0.995)
+///   - Pattern-reuse LLT factorizations (Ψ = P + ρI + (1/δ)AᵀA + GᵀWG)
+///   - Warm-start support for iterative SQP loops
+///   - Adaptive penalty scaling (rho, delta)
+///
+/// Note: Assumes sparse P, A, G. Scaling must be applied by user.
+
 #pragma once
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
@@ -13,26 +33,27 @@ namespace piqp {
 using Vector = Eigen::VectorXd;
 using SparseMatrix = Eigen::SparseMatrix<double, Eigen::ColMajor, int>;
 
+/// Configuration for PIQP interior-point solver.
 struct PIQPSettings {
-    double eps_abs = 1e-6;
-    double eps_rel = 1e-6;
-    int max_iter = 300;
+    double eps_abs = 1e-6;  /// absolute tolerance
+    double eps_rel = 1e-6;  /// relative tolerance (scaled by problem magnitude)
+    int max_iter = 300;  /// max iterations
 
-    // Prox/PMM
-    double rho_init = 1e-2;
-    double delta_init = 1e-1;
-    double rho_floor = 1e-9;
-    double delta_floor = 1e-9;
+    /// Proximal method parameters (Algorithm 2 in Schwan et al. 2023)
+    double rho_init = 1e-2;  /// initial x-proximal penalty
+    double delta_init = 1e-1;  /// initial constraint-proximal penalty
+    double rho_floor = 1e-9;  /// min rho (prevent over-shrinking)
+    double delta_floor = 1e-9;  /// min delta
 
-    // Fraction-to-boundary
-    double tau = 0.995;
+    /// Step acceptance
+    double tau = 0.995;  /// fraction-to-boundary margin
 
-    // Numerical / logging
-    double reg_eps = 1e-12;
-    bool verbose = false;
+    /// Numeric stability and logging
+    double reg_eps = 1e-12;  /// regularization on Ψ diagonal
+    bool verbose = false;  /// print iteration summary
 
-    // Safety
-    double min_slack = 1e-16;
+    /// Slack/multiplier lower bound
+    double min_slack = 1e-16;  /// clamp s, z ≥ min_slack to preserve strict positivity
 
     // Note: PIQP does not implement scaling internally (unlike OSQP).
     // Scaling must be applied to P,q,A,b,G,h before calling setup().
@@ -50,24 +71,27 @@ struct PIQPResiduals {
     double gap = 0.0;
 };
 
+/// Solution and iteration statistics.
 struct PIQPResult {
-    std::string status;
+    std::string status;  /// "solved", "max_iter", etc.
     int iterations = 0;
-    Vector x;
-    Vector s;  // slacks
-    Vector y;  // λ = equality multipliers
-    Vector z;  // μ = inequality multipliers
+    Vector x;  /// primal solution
+    Vector s;  /// slack variables (s ≥ 0)
+    Vector y;  /// equality multipliers
+    Vector z;  /// inequality multipliers (μ ≥ 0)
 
-    double obj_val = 0.0;
-    PIQPResiduals residuals;
+    double obj_val = 0.0;  /// ½xᵀPx + qᵀx
+    PIQPResiduals residuals;  /// constraint violation, stationarity, duality gap
 };
 
+/// Interior-point solver for convex QPs (sparse matrices only).
 class PIQPSolver {
    public:
     explicit PIQPSolver(const PIQPSettings& settings = PIQPSettings{})
         : settings_(settings) {}
 
-    // Sparse-only setup
+    /// Configure problem: minimize ½xᵀPx + qᵀx s.t. Ax=b, Gx≤h.
+    /// Any constraint may be nullopt (omitted). Pattern analyzed at setup time.
     PIQPSolver& setup(const SparseMatrix& P, const Vector& q,
                       const std::optional<SparseMatrix>& A = std::nullopt,
                       const std::optional<Vector>& b = std::nullopt,
@@ -151,6 +175,8 @@ class PIQPSolver {
         return *this;
     }
 
+    /// Run the predictor-corrector interior-point algorithm.
+    /// Returns PIQPResult with solution, status, and residuals.
     PIQPResult solve() {
         std::string status = "max_iter";
         int iters = settings_.max_iter;
@@ -316,7 +342,7 @@ class PIQPSolver {
         return R;
     }
 
-    // Getters
+    /// Query solution state and settings.
     const PIQPSettings& getSettings() const { return settings_; }
     const Vector& getX() const { return x_; }
     const Vector& getS() const { return s_; }
@@ -326,9 +352,9 @@ class PIQPSolver {
     const std::string& getStatus() const { return status_; }
 
    public:
-    // ---- Warm start API ----
-    // Set initial iterates; any std::nullopt leaves current values in place.
-    // If copy_to_prox_centers==true, also sets (xi, lambda, nu) to the same.
+    /// Warm-start the solver with initial iterates (x, y, z, s).
+    /// std::nullopt leaves the corresponding variable in place.
+    /// Set copy_to_prox_centers=true to sync prox centers (xi, lambda, nu).
     PIQPSolver& warm_start(const std::optional<Vector>& x = std::nullopt,
                            const std::optional<Vector>& y = std::nullopt,
                            const std::optional<Vector>& z = std::nullopt,
