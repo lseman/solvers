@@ -98,7 +98,7 @@ if(BUILD_IPM)
         ipm_ext
         python/ipm_module.cpp
         src/ipm/IPSolver.cpp
-        src/ipm/ipm_linear_solver.cpp
+        # src/ipm/ipm_linear_solver.cpp
     )
     target_link_libraries(ipm_ext PRIVATE solvers_headers stdexec)
     set_target_properties(
