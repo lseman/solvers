@@ -55,24 +55,24 @@ void IPSolver::convert_to_standard_form(const Eigen::SparseMatrix<double>& A,
                                         Eigen::SparseMatrix<double>& As, Eigen::VectorXd& bs,
                                         Eigen::VectorXd& cs) {
     constexpr double infty = std::numeric_limits<double>::infinity();
-    const int n = A.rows();
-    const int m = A.cols();
+    const int m = A.rows();
+    const int n = A.cols();
 
     // Fast input validation
-    if (b.size() != n || c.size() != m) {
+    if (b.size() != m || c.size() != n) {
         throw std::invalid_argument("Size mismatch in inputs");
     }
 
     // Pre-calculate sizes in one pass
-    const int num_slacks = n - sense.sum();
+    const int num_slacks = m - sense.sum();
     int n_free = 0;
 
     // Use char instead of bool for better performance
-    std::vector<char> is_free(m);
+    std::vector<char> is_free(n);
 
     // First pass: just count free variables and mark free vars
     // This is faster than categorizing everything up front
-    for (int i = 0; i < m; ++i) {
+    for (int i = 0; i < n; ++i) {
         if (lb[i] == -infty && ub[i] == infty) {
             is_free[i] = 1;
             ++n_free;
@@ -80,9 +80,9 @@ void IPSolver::convert_to_standard_form(const Eigen::SparseMatrix<double>& A,
     }
 
     // Preallocate output vectors
-    const int total_vars = m + n_free + num_slacks;
+    const int total_vars = n + n_free + num_slacks;
     cs.resize(total_vars);
-    cs.head(m) = c;                    // Copy original costs
+    cs.head(n) = c;                    // Copy original costs
     cs.tail(total_vars - m).setZero(); // Zero out the rest
 
     // Direct assignment is faster than copying
@@ -95,7 +95,7 @@ void IPSolver::convert_to_standard_form(const Eigen::SparseMatrix<double>& A,
 
     // Process variables and construct matrix in a single pass
     int free_counter = 0;
-    for (int j = 0; j < m; ++j) {
+    for (int j = 0; j < n; ++j) {
         const double lj = lb[j];
         const double uj = ub[j];
 
@@ -135,14 +135,14 @@ void IPSolver::convert_to_standard_form(const Eigen::SparseMatrix<double>& A,
 
     // Add slack variables efficiently
     int slack_counter = 0;
-    for (int i = 0; i < n; ++i) {
+    for (int i = 0; i < m; ++i) {
         if (sense(i) == 0) {
-            triplets.emplace_back(i, m + n_free + slack_counter++, 1.0);
+            triplets.emplace_back(i, n + n_free + slack_counter++, 1.0);
         }
     }
 
     // Construct final sparse matrix efficiently
-    As.resize(n, total_vars);
+    As.resize(m, total_vars);
     As.reserve(estimated_nnz); // Reserve space before setting triplets
     As.setFromTriplets(triplets.begin(), triplets.end());
     As.makeCompressed();

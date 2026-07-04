@@ -2,10 +2,11 @@
 // Exposes IPMSolver, IPMSolution, and convenience wrappers
 // Can be built independently for use in other projects
 
-#include <pybind11/eigen.h>
-#include <pybind11/numpy.h>
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
+#include <nanobind/eigen/dense.h>
+#include <nanobind/eigen/sparse.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
@@ -17,7 +18,7 @@
 
 #include "../ipm/IPSolver.h"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
 namespace {
 
@@ -37,29 +38,29 @@ Eigen::VectorXd numeric_sense(const Eigen::VectorXd& raw, int rows) {
     return raw;
 }
 
-Eigen::VectorXd parse_sense(py::object sense, int rows) {
+Eigen::VectorXd parse_sense(nb::object sense, int rows) {
     if (sense.is_none()) {
         return default_sense(rows);
     }
-    if (py::isinstance<py::array>(sense)) {
-        return numeric_sense(sense.cast<Eigen::VectorXd>(), rows);
-    }
-    std::vector<std::string> tokens = sense.cast<std::vector<std::string>>();
-    if (static_cast<int>(tokens.size()) != rows) {
-        throw std::invalid_argument("ipm: sense length must match the number of rows in A");
-    }
-    Eigen::VectorXd sense_vec = Eigen::VectorXd::Zero(rows);
-    for (int i = 0; i < rows; ++i) {
-        if (tokens[i] == "=" || tokens[i] == "==") {
-            sense_vec(i) = 1.0;
+    if (nb::isinstance<nb::list>(sense) || nb::isinstance<nb::tuple>(sense)) {
+        std::vector<std::string> tokens = nb::cast<std::vector<std::string>>(sense);
+        if (static_cast<int>(tokens.size()) != rows) {
+            throw std::invalid_argument("ipm: sense length must match the number of rows in A");
         }
+        Eigen::VectorXd sense_vec = Eigen::VectorXd::Zero(rows);
+        for (int i = 0; i < rows; ++i) {
+            if (tokens[i] == "=" || tokens[i] == "==") {
+                sense_vec(i) = 1.0;
+            }
+        }
+        return sense_vec;
     }
-    return sense_vec;
+    return numeric_sense(nb::cast<Eigen::VectorXd>(sense), rows);
 }
 
 IPMSolution solve_ipm(const Eigen::SparseMatrix<double>& A, const Eigen::VectorXd& b,
                       const Eigen::VectorXd& c, const Eigen::VectorXd& lb,
-                      const Eigen::VectorXd& ub, py::object sense, double tol) {
+                      const Eigen::VectorXd& ub, nb::object sense, double tol) {
     if (A.cols() != c.size() || A.rows() != b.size() || c.size() != lb.size() ||
         c.size() != ub.size()) {
         throw std::invalid_argument(
@@ -83,50 +84,50 @@ IPMSolution solve_ipm(const Eigen::SparseMatrix<double>& A, const Eigen::VectorX
 
 IPMSolution solve_ipm_dense(const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
                             const Eigen::VectorXd& c, const Eigen::VectorXd& lb,
-                            const Eigen::VectorXd& ub, py::object sense, double tol) {
+                            const Eigen::VectorXd& ub, nb::object sense, double tol) {
     return solve_ipm(A.sparseView(), b, c, lb, ub, std::move(sense), tol);
 }
 
 }  // namespace
 
-PYBIND11_MODULE(ipm_solver, m) {
+NB_MODULE(ipm_solver, m) {
     m.doc() = "simplinho IPM solver bindings (standalone, reusable across projects)";
 
-    py::class_<IPMSolution>(m, "IPMSolution")
-        .def_property_readonly("x", [](const IPMSolution& self) { return self.primals; })
-        .def_property_readonly("primals",
+    nb::class_<IPMSolution>(m, "IPMSolution")
+        .def_prop_ro("x", [](const IPMSolution& self) { return self.primals; })
+        .def_prop_ro("primals",
                                [](const IPMSolution& self) { return self.primals; })
-        .def_property_readonly("duals", [](const IPMSolution& self) { return self.duals; })
-        .def_property_readonly("status", [](const IPMSolution& self) { return self.status; })
-        .def_property_readonly("obj", [](const IPMSolution& self) { return self.objective; })
-        .def_property_readonly("objective",
+        .def_prop_ro("duals", [](const IPMSolution& self) { return self.duals; })
+        .def_prop_ro("status", [](const IPMSolution& self) { return self.status; })
+        .def_prop_ro("obj", [](const IPMSolution& self) { return self.objective; })
+        .def_prop_ro("objective",
                                [](const IPMSolution& self) { return self.objective; });
 
-    py::class_<IPSolver>(m, "IPSolver")
-        .def(py::init<>())
+    nb::class_<IPSolver>(m, "IPSolver")
+        .def(nb::init<>())
         .def(
             "solve",
             [](IPSolver&, const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
                const Eigen::VectorXd& c, const Eigen::VectorXd& lb, const Eigen::VectorXd& ub,
-               py::object sense,
+               nb::object sense,
                double tol) { return solve_ipm_dense(A, b, c, lb, ub, std::move(sense), tol); },
-            py::arg("A"), py::arg("b"), py::arg("c"), py::arg("lb"), py::arg("ub"),
-            py::arg("sense") = py::none(), py::arg("tol") = 1e-8,
+            nb::arg("A"), nb::arg("b"), nb::arg("c"), nb::arg("lb"), nb::arg("ub"),
+            nb::arg("sense") = nb::none(), nb::arg("tol") = 1e-8,
             "Solve min c^T x subject to A x =/<=/>= b and lb <= x <= ub (dense).")
         .def(
             "solve",
             [](IPSolver&, const Eigen::SparseMatrix<double>& A, const Eigen::VectorXd& b,
                const Eigen::VectorXd& c, const Eigen::VectorXd& lb, const Eigen::VectorXd& ub,
-               py::object sense,
+               nb::object sense,
                double tol) { return solve_ipm(A, b, c, lb, ub, std::move(sense), tol); },
-            py::arg("A"), py::arg("b"), py::arg("c"), py::arg("lb"), py::arg("ub"),
-            py::arg("sense") = py::none(), py::arg("tol") = 1e-8,
+            nb::arg("A"), nb::arg("b"), nb::arg("c"), nb::arg("lb"), nb::arg("ub"),
+            nb::arg("sense") = nb::none(), nb::arg("tol") = 1e-8,
             "Solve min c^T x subject to A x =/<=/>= b and lb <= x <= ub (sparse).");
 
-    m.def("solve_ipm", &solve_ipm_dense, py::arg("A"), py::arg("b"), py::arg("c"), py::arg("lb"),
-          py::arg("ub"), py::arg("sense") = py::none(), py::arg("tol") = 1e-8,
+    m.def("solve_ipm", &solve_ipm_dense, nb::arg("A"), nb::arg("b"), nb::arg("c"), nb::arg("lb"),
+          nb::arg("ub"), nb::arg("sense") = nb::none(), nb::arg("tol") = 1e-8,
           "Convenience wrapper for IPSolver.solve using a dense matrix.");
-    m.def("solve_ipm", &solve_ipm, py::arg("A"), py::arg("b"), py::arg("c"), py::arg("lb"),
-          py::arg("ub"), py::arg("sense") = py::none(), py::arg("tol") = 1e-8,
+    m.def("solve_ipm", &solve_ipm, nb::arg("A"), nb::arg("b"), nb::arg("c"), nb::arg("lb"),
+          nb::arg("ub"), nb::arg("sense") = nb::none(), nb::arg("tol") = 1e-8,
           "Convenience wrapper for IPSolver.solve using a sparse matrix.");
 }

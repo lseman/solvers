@@ -19,6 +19,8 @@
 
 #pragma once
 
+#include "qp/ruiz.h"
+
 #include <Eigen/Core>
 #include <Eigen/SparseCholesky>
 #include <Eigen/SparseCore>
@@ -37,28 +39,17 @@ using Scalar = double;
 using Vec = Eigen::VectorXd;
 using SpMat = Eigen::SparseMatrix<Scalar, Eigen::ColMajor, int>;
 using Triplet = Eigen::Triplet<Scalar>;
-
-// -------- Efficient in-place column/row scaling for SpMat --------
-inline void scale_cols_inplace(SpMat& M, const Vec& s) {
-    const int n = M.cols();
-    for (int j = 0; j < n; ++j) {
-        Scalar sj = (j < s.size() ? s[j] : 1.0);
-        if (sj == 1.0) continue;
-        for (SpMat::InnerIterator it(M, j); it; ++it) {
-            it.valueRef() *= sj;  // scale column j
-        }
-    }
-}
-inline void scale_rows_inplace(SpMat& M, const Vec& s) {
-    const int n = M.cols();
-    for (int j = 0; j < n; ++j) {
-        for (SpMat::InnerIterator it(M, j); it; ++it) {
-            int i = it.row();
-            Scalar si = (i < s.size() ? s[i] : 1.0);
-            if (si != 1.0) it.valueRef() *= si;  // scale row i
-        }
-    }
-}
+using Residuals = solvers::ruiz::Residuals;
+using Scaling = solvers::ruiz::Scaling;
+using Termination = solvers::ruiz::Termination;
+using solvers::ruiz::col_inf_norm;
+using solvers::ruiz::compute_residuals_unscaled;
+using solvers::ruiz::compute_thresholds_unscaled;
+using solvers::ruiz::inf_norm;
+using solvers::ruiz::map_solution_from_scaled;
+using solvers::ruiz::row_inf_norm;
+using solvers::ruiz::ruiz_equilibrate_modified;
+using solvers::ruiz::scale_rows_inplace;
 
 /// Wrapper around Eigen::SimplicialLDLT for division-free solves.
 /// Caches L, P, invD to enable custom solve strategies (unused here;
@@ -284,11 +275,6 @@ inline SpMat create_scaled_A(const SpMat& A, const Vec& rho) {
     scaled.makeCompressed();
     return scaled;
 }
-// ============================ Small utilities ============================
-inline Scalar inf_norm(const Vec& v) {
-    return (v.size() ? v.lpNorm<Eigen::Infinity>() : 0.0);
-}
-
 // ---------- Fast Normal-Equations cache with symbolic reuse ----------
 struct NEFast {
     // M(w) = H + w * G
@@ -405,12 +391,6 @@ struct Settings {
     Settings() = default;
 };
 
-/// Convergence residuals: primal and dual infeasibilities.
-struct Residuals {
-    Scalar pri_inf = 0.0;  /// ‖Ax - z‖∞
-    Scalar dua_inf = 0.0;  /// ‖Px + q + Aᵀy‖∞
-};
-
 /// Solution and termination result.
 struct Result {
     std::string status = "max_iter_reached";  /// "solved", "primal_infeasible", "dual_infeasible", "max_iter_reached", "factorization_failed"
@@ -447,12 +427,6 @@ inline SpMat build_M(const SpMat& P, const SpMat& A, const Vec& rho,
     return M;
 }
 
-// -------- residuals & thresholds (original space) --------
-struct Termination {
-    Scalar eps_pri = 0.0;
-    Scalar eps_dua = 0.0;
-};
-
 inline Termination compute_thresholds(const SpMat& P, const SpMat& A,
                                       const Vec& x, const Vec& z, const Vec& q,
                                       const Vec& y, const Settings& cfg) {
@@ -484,185 +458,6 @@ inline Residuals compute_residuals(const SpMat& P, const SpMat& A, const Vec& x,
         ATy = Vec::Zero(x.size());
     }
     Vec r_d = P * x + q + ATy;
-    return {inf_norm(r_p), inf_norm(r_d)};
-}
-
-// =============================== Ruiz scaling ===============================
-struct Scaling {
-    // x̄ = D^{-1} x,  z̄ = E z,  ȳ = c E^{-1} y
-    Vec Dx;  // length n (positive)
-    Vec Ez;  // length m (positive)
-    Scalar c = 1.0;
-    bool enabled = false;
-
-    void reset(int n, int m) {
-        Dx = Vec::Ones(n);
-        Ez = Vec::Ones(m);
-        c = 1.0;
-        enabled = false;
-    }
-};
-
-inline Scalar col_inf_norm(const SpMat& M, int j) {
-    Scalar v = 0.0;
-    for (SpMat::InnerIterator it(M, j); it; ++it)
-        v = std::max(v, std::abs(it.value()));
-    return v;
-}
-
-inline Scalar row_inf_norm(const SpMat& M, int i) {
-    Scalar v = 0.0;
-    for (int k = 0; k < M.outerSize(); ++k)
-        for (SpMat::InnerIterator it(M, k); it; ++it)
-            if (it.row() == i) v = std::max(v, std::abs(it.value()));
-    return v;
-}
-
-// Modified Ruiz equilibration (block-wise; paper Alg. 2)
-inline void ruiz_equilibrate_modified(const SpMat& P, const Vec& q,
-                                      const SpMat& A, const Vec& l,
-                                      const Vec& u, int max_iter, Scalar tol,
-                                      SpMat& Pbar, Vec& qbar, SpMat& Abar,
-                                      Vec& lbar, Vec& ubar, Scaling& S) {
-    const int n = int(P.rows());
-    const int m = int(A.rows());
-
-    S.reset(n, m);
-    Pbar = P;
-    Abar = A;
-    qbar = q;
-    lbar = l;
-    ubar = u;
-
-    Vec delta_x = Vec::Ones(n);
-    Vec delta_z = Vec::Ones(m);
-
-    for (int it = 0; it < max_iter; ++it) {
-        Scalar max_dev = 0.0;
-
-        // Columns for x-block (P cols and A cols)
-        for (int j = 0; j < n; ++j) {
-            Scalar nP = col_inf_norm(Pbar, j);
-            Scalar nA = col_inf_norm(Abar, j);
-            Scalar s = std::max(nP, nA);
-            Scalar dj = (s > 0) ? 1.0 / std::sqrt(s) : 1.0;
-            delta_x[j] = dj;
-            max_dev = std::max(max_dev, std::abs(1.0 - dj));
-        }
-
-        // Rows for z-block = rows of A
-        for (int i = 0; i < m; ++i) {
-            Scalar nAr = row_inf_norm(Abar, i);
-            Scalar di = (nAr > 0) ? 1.0 / std::sqrt(nAr) : 1.0;
-            delta_z[i] = di;
-            max_dev = std::max(max_dev, std::abs(1.0 - di));
-        }
-
-        // Apply: P̄ ← D P̄ D;  Ā ← E Ā D;  q̄ ← D q̄;  l̄,ū ← E l̄, E ū
-        scale_cols_inplace(Pbar, delta_x);
-        scale_rows_inplace(Pbar, delta_x);
-        // Abar rows (E), then cols (D)
-        scale_rows_inplace(Abar, delta_z);
-        scale_cols_inplace(Abar, delta_x);
-        // qbar
-        qbar = delta_x.cwiseProduct(qbar);
-        // bounds
-        if (lbar.size()) lbar = delta_z.cwiseProduct(lbar);
-        if (ubar.size()) ubar = delta_z.cwiseProduct(ubar);
-
-        // Accumulate
-        S.Dx = S.Dx.cwiseProduct(delta_x);
-        S.Ez = S.Ez.cwiseProduct(delta_z);
-
-        // Cost scaling γ
-        Scalar meanPcol = 0.0;
-        if (n) {
-            Scalar sum = 0.0;
-            for (int j = 0; j < n; ++j) sum += col_inf_norm(Pbar, j);
-            meanPcol = sum / n;
-        }
-        Scalar qinf = (qbar.size() ? qbar.lpNorm<Eigen::Infinity>() : 1.0);
-        Scalar gamma = 1.0 / std::max(meanPcol, qinf);
-        if (!std::isfinite(gamma) || gamma <= 0) gamma = 1.0;
-
-        Pbar *= gamma;
-        qbar *= gamma;
-        S.c *= gamma;
-
-        if (max_dev <= tol) break;
-    }
-
-    S.enabled = true;
-}
-
-// Map initial guesses to scaled space
-inline void map_initial_to_scaled(const Scaling& S, Vec& x0, Vec& z0, Vec& y0) {
-    if (!S.enabled) return;
-    if (x0.size()) x0 = x0.cwiseQuotient(S.Dx);          // x̄0 = D^{-1} x0
-    if (z0.size()) z0 = S.Ez.cwiseProduct(z0);           // z̄0 = E z0
-    if (y0.size()) y0 = (S.c) * y0.cwiseQuotient(S.Ez);  // ȳ0 = c E^{-1} y0
-}
-
-// Map solution back to original space
-inline void map_solution_from_scaled(const Scaling& S, Vec& x, Vec& z, Vec& y) {
-    if (!S.enabled) return;
-    if (x.size()) x = S.Dx.cwiseProduct(x);                // x = D x̄
-    if (z.size()) z = z.cwiseQuotient(S.Ez);               // z = E^{-1} z̄
-    if (y.size()) y = (1.0 / S.c) * S.Ez.cwiseProduct(y);  // y = c^{-1} E ȳ
-}
-
-// Unscaled thresholds from scaled iterates (paper §5.1)
-inline Termination compute_thresholds_unscaled(
-    const SpMat& Pbar, const SpMat& Abar, const Vec& xbar, const Vec& zbar,
-    const Vec& qbar, const Vec& ybar, const Scaling& S, const Settings& cfg) {
-    Vec Ax_bar = (Abar.rows() ? Abar * xbar : Vec());
-    Scalar term_pri = 0.0;
-    if (zbar.size()) {
-        Scalar tA =
-            (Ax_bar.size()
-                 ? (Ax_bar.cwiseQuotient(S.Ez)).lpNorm<Eigen::Infinity>()
-                 : 0.0);
-        Scalar tz = (zbar.cwiseQuotient(S.Ez)).lpNorm<Eigen::Infinity>();
-        term_pri = std::max(tA, tz);
-    }
-
-    Vec Px_bar = (Pbar.rows() ? Pbar * xbar : Vec());
-    Vec ATy_bar = (Abar.rows() ? Abar.transpose() * ybar : Vec());
-    Scalar t1 =
-        (Px_bar.size() ? (Px_bar.cwiseQuotient(S.Dx)).lpNorm<Eigen::Infinity>()
-                       : 0.0);
-    Scalar t2 = (ATy_bar.size()
-                     ? (ATy_bar.cwiseQuotient(S.Dx)).lpNorm<Eigen::Infinity>()
-                     : 0.0);
-    Scalar t3 =
-        (qbar.size() ? (qbar.cwiseQuotient(S.Dx)).lpNorm<Eigen::Infinity>()
-                     : 0.0);
-    Scalar term_dua = (1.0 / S.c) * std::max({t1, t2, t3});
-
-    return {cfg.eps_abs + cfg.eps_rel * term_pri,
-            cfg.eps_abs + cfg.eps_rel * term_dua};
-}
-
-// Unscaled residuals from scaled vars (paper §5.1)
-inline Residuals compute_residuals_unscaled(const SpMat& Pbar,
-                                            const SpMat& Abar, const Vec& xbar,
-                                            const Vec& zbar, const Vec& qbar,
-                                            const Vec& ybar, const Scaling& S) {
-    Vec r_p, r_d;
-    if (Abar.rows()) {
-        Vec tmp = Abar * xbar - zbar;
-        r_p = tmp.cwiseQuotient(S.Ez);
-    } else
-        r_p.resize(0);
-
-    Vec Px = (Pbar.rows() ? Pbar * xbar : Vec());
-    Vec ATy = (Abar.rows() ? Abar.transpose() * ybar : Vec());
-    Vec sum = Vec::Zero(xbar.size());
-    if (Px.size()) sum += Px;
-    if (qbar.size()) sum += qbar;
-    if (ATy.size()) sum += ATy;
-    r_d = (1.0 / S.c) * sum.cwiseQuotient(S.Dx);
-
     return {inf_norm(r_p), inf_norm(r_d)};
 }
 
@@ -890,7 +685,8 @@ class SparseOSQPSolver {
                 r = compute_residuals_unscaled(P_use, A_use, xbar, zbar, q_use,
                                                ybar, S);
                 t = compute_thresholds_unscaled(P_use, A_use, xbar, zbar, q_use,
-                                                ybar, S, cfg);
+                                                ybar, S, cfg.eps_abs,
+                                                cfg.eps_rel);
             } else {
                 r = compute_residuals(P_use, A_use, xbar, zbar, q_use, ybar);
                 t = compute_thresholds(P_use, A_use, xbar, zbar, q_use, ybar,

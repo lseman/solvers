@@ -5,7 +5,10 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <Eigen/QR>
 #include <Eigen/Sparse>
+#include <Eigen/SparseCholesky>
+#include <Eigen/SparseLU>
 #include <memory>
 #include <vector>
 
@@ -50,6 +53,10 @@ class SparseIPMSolver : public IPMLinearSolver {
   private:
     LinearSolverType solver_type_;
     bool factorized_ = false;
+    bool use_dense_fallback_ = false;
+    Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> ldlt_;
+    Eigen::SparseLU<Eigen::SparseMatrix<double>, Eigen::COLAMDOrdering<int>> lu_;
+    Eigen::CompleteOrthogonalDecomposition<Eigen::MatrixXd> dense_cod_;
 };
 
 // Frontal solver wrapper (SOTA)
@@ -71,7 +78,7 @@ class HybridIPMSolver : public IPMLinearSolver {
   public:
     HybridIPMSolver()
         : solver_(std::make_unique<SparseIPMSolver>(
-              LinearSolverType::kSparseLDLT)) {}
+              LinearSolverType::kSparseLU)) {}
 
     void factorize(const Eigen::SparseMatrix<double>& A) override;
     Eigen::VectorXd solve(const Eigen::VectorXd& rhs) override;
@@ -87,7 +94,7 @@ class HybridIPMSolver : public IPMLinearSolver {
 
   private:
     std::unique_ptr<IPMLinearSolver> solver_;
-    LinearSolverType active_type_ = LinearSolverType::kSparseLDLT;
+    LinearSolverType active_type_ = LinearSolverType::kSparseLU;
 
     // Heuristic: estimate if problem is structured enough for frontal
     bool should_use_frontal(const Eigen::SparseMatrix<double>& A) const;

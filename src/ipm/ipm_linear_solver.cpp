@@ -14,15 +14,48 @@ namespace ipm {
 // ===== SparseIPMSolver (existing sparse behavior) =====
 
 void SparseIPMSolver::factorize(const Eigen::SparseMatrix<double>& A) {
-    // TODO: Implement sparse factorization (LDLT or LU)
-    // For now, stub that marks as factorized
-    factorized_ = true;
+    factorized_ = false;
+    use_dense_fallback_ = false;
+    if (solver_type_ == LinearSolverType::kSparseLU) {
+        lu_.compute(A);
+        factorized_ = (lu_.info() == Eigen::Success);
+        if (!factorized_) {
+            dense_cod_.compute(Eigen::MatrixXd(A));
+            use_dense_fallback_ = true;
+            factorized_ = use_dense_fallback_;
+        }
+        return;
+    }
+
+    ldlt_.compute(A);
+    if (ldlt_.info() == Eigen::Success) {
+        factorized_ = true;
+        return;
+    }
+
+    lu_.compute(A);
+    if (lu_.info() == Eigen::Success) {
+        solver_type_ = LinearSolverType::kSparseLU;
+        factorized_ = true;
+        return;
+    }
+
+    dense_cod_.compute(Eigen::MatrixXd(A));
+    use_dense_fallback_ = true;
+    factorized_ = use_dense_fallback_;
 }
 
 Eigen::VectorXd SparseIPMSolver::solve(const Eigen::VectorXd& rhs) {
-    // TODO: Implement sparse solve
-    // For now, return zero vector
-    return Eigen::VectorXd::Zero(rhs.size());
+    if (!factorized_) {
+        throw std::runtime_error("SparseIPMSolver: not factorized");
+    }
+    if (use_dense_fallback_) {
+        return dense_cod_.solve(rhs);
+    }
+    if (solver_type_ == LinearSolverType::kSparseLU) {
+        return lu_.solve(rhs);
+    }
+    return ldlt_.solve(rhs);
 }
 
 std::string SparseIPMSolver::info() const {
@@ -76,6 +109,9 @@ std::string FrontalIPMSolver::info() const {
 
 bool HybridIPMSolver::should_use_frontal(
     const Eigen::SparseMatrix<double>& A) const {
+    (void) A;
+    return false;
+
     // Simple heuristic: use frontal if matrix is dense enough
     // and has good supernode structure (i.e., column count close to row count)
     // For IPM KKT systems, typically m << n, so this is problem-dependent.
@@ -101,9 +137,9 @@ void HybridIPMSolver::factorize(const Eigen::SparseMatrix<double>& A) {
         chosen = LinearSolverType::kFrontal;
         solver_ = std::make_unique<FrontalIPMSolver>();
     } else {
-        chosen = LinearSolverType::kSparseLDLT;
+        chosen = LinearSolverType::kSparseLU;
         solver_ = std::make_unique<SparseIPMSolver>(
-            LinearSolverType::kSparseLDLT);
+            LinearSolverType::kSparseLU);
     }
 
     active_type_ = chosen;

@@ -50,7 +50,7 @@ set_target_properties(
     osqp_ext
     PROPERTIES
         OUTPUT_NAME osqp
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/solvers
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
 nanobind_add_module(piqp_ext python/piqp_ext.cpp)
@@ -59,7 +59,7 @@ set_target_properties(
     piqp_ext
     PROPERTIES
         OUTPUT_NAME piqp
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/solvers
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
 nanobind_add_module(qdldl_ext python/qdldl_ext.cpp)
@@ -68,10 +68,22 @@ set_target_properties(
     qdldl_ext
     PROPERTIES
         OUTPUT_NAME qdldl
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/solvers
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
-configure_file(python/solvers/__init__.py ${CMAKE_BINARY_DIR}/solvers/__init__.py COPYONLY)
+nanobind_add_module(
+    ipm_ext
+    python/ipm_module.cpp
+    src/ipm/IPSolver.cpp
+    src/ipm/ipm_linear_solver.cpp
+)
+target_link_libraries(ipm_ext PRIVATE solvers_headers)
+set_target_properties(
+    ipm_ext
+    PROPERTIES
+        OUTPUT_NAME ipm_solver
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+)
 
-install(TARGETS osqp_ext piqp_ext qdldl_ext LIBRARY DESTINATION solvers)
+install(TARGETS osqp_ext piqp_ext qdldl_ext ipm_ext LIBRARY DESTINATION solvers)
 install(FILES python/solvers/__init__.py DESTINATION solvers)
