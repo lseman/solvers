@@ -83,7 +83,7 @@ void IPSolver::convert_to_standard_form(const Eigen::SparseMatrix<double>& A,
     const int total_vars = n + n_free + num_slacks;
     cs.resize(total_vars);
     cs.head(n) = c;                    // Copy original costs
-    cs.tail(total_vars - m).setZero(); // Zero out the rest
+    cs.tail(total_vars - n).setZero(); // Zero out the rest
 
     // Direct assignment is faster than copying
     bs = b;
@@ -467,10 +467,10 @@ void IPSolver::run_optimization(const OptimizationData& data, const double tol) 
             ubv_std.push_back(hi[i]);
         }
     }
-    Eigen::VectorXi ubi =
-        Eigen::Map<Eigen::VectorXi>(indices.data(), static_cast<int>(indices.size()));
-    Eigen::VectorXd ubv =
-        Eigen::Map<Eigen::VectorXd>(ubv_std.data(), static_cast<int>(ubv_std.size()));
+    Eigen::VectorXi ubi(indices.size());
+    ubi = Eigen::Map<Eigen::VectorXi>(indices.data(), static_cast<int>(indices.size()));
+    Eigen::VectorXd ubv(ubv_std.size());
+    ubv = Eigen::Map<Eigen::VectorXd>(ubv_std.data(), static_cast<int>(ubv_std.size()));
 
     // Initialize additional vectors
     Eigen::VectorXd v = Eigen::VectorXd::Ones(ubv.size());
