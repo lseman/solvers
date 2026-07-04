@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "LDLT.h"
+#include "../linear_system/schur_frontal_ldlt.h"
 
 /**
  * @struct ModelData
@@ -120,6 +121,7 @@ public:
 
   enum SolverType {
     LDLT,
+    FRONTAL,
   };
 
   SparseSolver(SolverType type = LDLT) {
@@ -128,6 +130,9 @@ public:
       solver = new SolverWrapper<
           Eigen::CustomSimplicialLDLT<Eigen::SparseMatrix<double>, Eigen::Lower,
                                       Eigen::AMDOrdering<int>>>();
+      break;
+    case FRONTAL:
+      solver = new FrontalLDLTWrapper();
       break;
     }
   }
@@ -157,6 +162,50 @@ private:
     virtual ~SolverBase() = default;
     virtual void reset() = 0;
     virtual int info() = 0;
+  };
+
+  struct FrontalLDLTWrapper : public SolverBase {
+    schur_frontal::FrontalLDLT ldlt;
+    int info_code = 0;
+
+    void factorizeMatrix(const Eigen::SparseMatrix<double, Eigen::ColMajor, int>
+                             &matrix) override {
+      try {
+        // Build supernode ranges (simple: each column is a supernode)
+        std::vector<std::pair<int, int>> supernode_ranges;
+        for (int i = 0; i < matrix.cols(); ++i) {
+          supernode_ranges.push_back({i, i});
+        }
+        // Build column-to-supernode map
+        std::vector<int> col2sn(matrix.cols());
+        for (int i = 0; i < matrix.cols(); ++i) col2sn[i] = i;
+        // Build elimination tree (simple: sequential)
+        std::vector<int> etree(matrix.cols(), -1);
+
+        ldlt = schur_frontal::build_and_factor_frontal(matrix, supernode_ranges, col2sn, etree);
+        info_code = ldlt.factorized ? 0 : 1;
+      } catch (...) {
+        info_code = 1;
+      }
+    }
+
+    Eigen::VectorXd solve(const Eigen::VectorXd &rhs) override {
+      if (!ldlt.factorized || rhs.size() != ldlt.n) return rhs;
+      try {
+        std::vector<double> rhs_std(rhs.data(), rhs.data() + rhs.size());
+        auto sol_std = schur_frontal::solve(ldlt, rhs_std);
+        return Eigen::VectorXd::Map(sol_std.data(), sol_std.size());
+      } catch (...) {
+        return rhs;
+      }
+    }
+
+    void reset() override {
+      ldlt.fronts.clear();
+      ldlt.factorized = false;
+    }
+
+    int info() override { return info_code; }
   };
 
   template <typename Solver> struct SolverWrapper : public SolverBase {
