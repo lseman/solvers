@@ -39,7 +39,7 @@ public:
     FRONTAL,
   };
 
-  SparseSolver(SolverType type = LDLT) {
+  SparseSolver(SolverType type = LDLT) : solverType(type) {
     switch (type) {
     case LDLT:
       solver = new SolverWrapper<
@@ -65,6 +65,12 @@ public:
 
   Eigen::VectorXd solve(const Eigen::VectorXd &rhs) {
     return solver->solve(rhs);
+  }
+
+  // Query active solver type
+  SolverType activeSolverType() const { return solverType; }
+  std::string solverName() const {
+    return solverType == LDLT ? "CustomSimplicialLDLT" : "FrontalLDLT";
   }
 
 private:

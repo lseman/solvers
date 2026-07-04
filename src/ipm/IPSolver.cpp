@@ -905,6 +905,8 @@ void IPSolver::start_linear_solver(SparseSolver &ls,
   ls.S = S_;
   // Factorize
   ls.factorizeMatrix(ls.S);
+  // Log which solver is active
+  std::cerr << "[IPM] Solver: " << ls.solverName() << std::endl;
 }
 
 Eigen::SparseMatrix<double>
