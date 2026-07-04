@@ -1,8 +1,18 @@
-#pragma once
-// qdldl.h — header-only LDLᵀ (QDLDL-style) for upper CSC
-// C++23, optimized for performance, exact-zero pivot, no sign forcing.
-// Enhanced with SOTA optimizations while maintaining API compatibility
-// © 2025 — MIT/Apache-2.0 compatible with original QDLDL spirit.
+/// qdldl.h — Header-only LDLᵀ factorization (QDLDL-style) for sparse upper CSC
+///
+/// Modern C++20/23 implementation of the QDLDL algorithm for symmetric
+/// positive-definite systems. Emphasizes cache efficiency, SIMD acceleration
+/// (AVX-512, AVX2, SSE2), and numerical stability.
+///
+/// Core features:
+///   - Exact-zero pivot detection (no fill-in tricks)
+///   - Pattern analysis and numeric factorization phases
+///   - Permutation support via Ordering struct
+///   - Iterative refinement for improved accuracy
+///   - SIMD-accelerated solves and memory operations
+///   - Optional stdexec parallel execution
+///
+/// © 2025 — MIT / Apache-2.0 compatible with original QDLDL spirit.
 
 #include <algorithm>
 #include <bit>

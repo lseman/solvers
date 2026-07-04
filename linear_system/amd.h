@@ -1,8 +1,17 @@
-#pragma once
-
-// amd_array_qg_sota.hpp (single translation unit demo, SoTA-leaning tweaks)
-// Build: g++ -O3 -march=native -std=c++17 amd_array_qg_sota.hpp -o amd && ./amd
-// (Optional) parallel loops: add -fopenmp
+/// amd.h — Approximate Minimum Degree matrix reordering
+///
+/// Array-based implementation of AMD for fill-reduction in sparse factorization.
+/// Groups variables by connectivity pattern, applies elimination heuristics,
+/// and produces a permutation that reduces bandwidth and fill-in.
+///
+/// Features:
+///   - Hash-based variable/element grouping (coalescence)
+///   - Aggressive absorption of duplicate elements
+///   - Dense variable postponement with adaptive thresholding
+///   - Statistics reporting (absorbed, coalesced, bandwidth reduction)
+///
+/// Compile: g++ -O3 -march=native -std=c++17 amd.h
+/// Optional: add -fopenmp for parallel degree updates
 
 #include <algorithm>
 #include <cassert>

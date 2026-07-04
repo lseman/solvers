@@ -1,24 +1,28 @@
-// supernodes.h
-// SoTA-leaning supernode identification using qdldl23's *permuted upper CSC*
-// and its symbolic analysis. Works directly on B = P A Pᵀ (upper+diag).
-//
-// Drop-in usage:
-//   #include "qdldl.h"
-//   #include "supernodes.h"
-//
-//   using namespace qdldl23;
-//   SparseD32 B = /* your permuted upper CSC */;
-//   Symb32    S = analyze_fast(B);        // etree + column counts
-//   auto sn = identify_supernodes_qdldl(B, S,
-//                                       /*relax_abs*/ 2,
-//                                       /*relax_rel*/ 0.10,
-//                                       /*tau*/       0.70,
-//                                       /*max_size*/  128);
-//
-// Returns supernode ranges in *permuted* column space, plus etree and
-// postorder.
-//
-// © 2025 MIT/Apache-2.0
+/// supernodes.h — Supernode identification for sparse LDLᵀ factorization
+///
+/// Identifies supernodes (groups of consecutive columns with identical lower
+/// L-patterns) from the permuted upper CSC matrix and symbolic analysis.
+/// Supernodes enable BLAS-3 kernels for better cache utilization and throughput.
+///
+/// Usage:
+///   #include "qdldl.h"
+///   #include "supernodes.h"
+///
+///   using namespace qdldl23;
+///   SparseD32 B = /* permuted upper CSC */;
+///   Symb32 S = analyze_fast(B);
+///   auto sn = identify_supernodes_qdldl(B, S,
+///       relax_abs = 2, relax_rel = 0.10, tau = 0.70, max_size = 128);
+///
+/// The returned SupernodeInfo contains:
+///   - ranges: inclusive [lo, hi] column pairs for each supernode
+///   - col2sn: column-to-supernode mapping
+///   - etree: elimination tree (copy)
+///   - post: postorder traversal of etree
+///
+/// Columns are indexed in the *permuted* space (after P A Pᵀ).
+///
+/// © 2025 MIT / Apache-2.0
 
 #pragma once
 #include <algorithm>
@@ -35,7 +39,8 @@ namespace snode {
 // ===== types =====
 using i32 = int32_t;
 
-// Supernode metadata (columns are in *permuted* space)
+/// Supernode metadata from symbolic analysis.
+/// All indices (ranges, col2sn, etree) are in the *permuted* column space.
 template <typename IntT = i32>
 struct SupernodeInfo {
     std::vector<std::pair<IntT, IntT>>
@@ -45,7 +50,8 @@ struct SupernodeInfo {
     std::vector<IntT> post;    // postorder of etree
 };
 
-// ----- robust postorder over an etree forest (iterative DFS) -----
+/// Compute postorder traversal of an elimination tree forest (iterative DFS).
+/// Handles forests gracefully (trees with -1 roots); visits all roots.
 template <typename IntT = i32>
 static std::vector<IntT> postorder_etree_safe(const std::vector<IntT>& parent) {
     const IntT n = static_cast<IntT>(parent.size());
@@ -92,11 +98,11 @@ static std::vector<IntT> postorder_etree_safe(const std::vector<IntT>& parent) {
     return post;
 }
 
-// ----- build symbolic lower-factor row patterns from B and etree -----
-// L-pattern column j is the sorted set of descendants touched by the symbolic
-// reach of B(:,j), with rows > j. This is the structural object used for
-// supernode detection; comparing raw B columns misses fill and is too weak for
-// modern sparse factorization.
+/// Compute symbolic L-factor row patterns from the upper CSC matrix and etree.
+/// L-pattern[j] is the sorted set of descendants < j touched by the symbolic
+/// reach of B(:,j). These patterns form the structural basis for supernode
+/// detection: exact matching identifies fundamental supernodes; relaxed matching
+/// merges additional columns with similar (but not identical) row patterns.
 template <typename FloatT = double, typename IntT = int32_t>
 static std::vector<std::vector<IntT>> symbolic_l_patterns(
     const qdldl23::SparseUpperCSC<FloatT, IntT>& B,
@@ -128,11 +134,12 @@ static std::vector<std::vector<IntT>> symbolic_l_patterns(
     return patterns;
 }
 
-// ----- relaxed structural match on sorted row sets (two-pointer) -----
-// Compare factor-row sets S(j) and S(k). Accept if:
-//   - symmetric difference <= relax_abs
-//   - and symdiff / |S(j)| <= relax_rel      (if |S(j)| > 0)
-//   - and Jaccard >= tau
+/// Test relaxed structural match between two sorted row sets via two-pointer scan.
+/// Columns j and k match if:
+///   - |S(j) Δ S(k)| ≤ relax_abs, AND
+///   - |S(j) Δ S(k)| / |S(j)| ≤ relax_rel (if |S(j)| > 0), AND
+///   - Jaccard(S(j), S(k)) ≥ tau
+/// Enables flexible supernode merging beyond exact structural match.
 template <typename IntT = i32>
 static inline bool relaxed_match_twoptr(const IntT* Aj, IntT lenj,
                                         const IntT* Ak, IntT lenk,
@@ -172,8 +179,14 @@ static inline bool relaxed_match_twoptr(const IntT* Aj, IntT lenj,
     return jac >= tau;
 }
 
-// ----- main: identify supernodes from qdldl's permuted upper CSC & symbolics
-// ----- Works for any FloatT/IntT supported by qdldl23.
+/// Identify supernodes from permuted upper CSC and symbolic analysis.
+/// Groups consecutive columns whose L-patterns satisfy relaxed matching criteria.
+/// Params:
+///   - relax_abs: max symmetric set difference (absolute count)
+///   - relax_rel: max symmetric set difference (relative to |S(j)|)
+///   - tau: minimum Jaccard similarity required
+///   - max_size: cap on supernode width (prevents pathologically large blocks)
+/// Returns SupernodeInfo with ranges, col2sn map, etree, and postorder.
 template <typename FloatT = double, typename IntT = int32_t>
 static SupernodeInfo<IntT> identify_supernodes_qdldl(
     const qdldl23::SparseUpperCSC<FloatT, IntT>& B,
@@ -218,7 +231,7 @@ static SupernodeInfo<IntT> identify_supernodes_qdldl(
     return out;
 }
 
-// ----- convenience overload for qdldl double/int32 aliases -----
+/// Convenience overload for qdldl23's double/int32 type aliases.
 inline SupernodeInfo<i32> identify_supernodes_qdldl(
     const qdldl23::SparseD32& B, const qdldl23::Symb32& S, i32 relax_abs = 0,
     double relax_rel = 0.0, double tau = 1.0,

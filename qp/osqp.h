@@ -1,4 +1,22 @@
-// include/qp/OSQP.h
+/// osqp.h — Operator Splitting QP Solver (OSQP-style, sparse first-order)
+///
+/// Fast first-order method for convex QPs via alternating direction method
+/// of multipliers (ADMM). Suitable for large-scale sparse problems.
+///
+/// Problem form:
+///   minimize  ½ x'Px + q'x
+///   s.t.      l ≤ Ax ≤ u
+///
+/// Features:
+///   - Fast normal-equations path with cached AᵀA
+///   - Quasi-definite KKT path for dense constraints
+///   - Modified Ruiz equilibration scaling
+///   - Adaptive penalty (rho) updates
+///   - Active-set polishing for solution refinement
+///   - Infeasibility certificates
+///
+/// Based on: Stellato et al. (2020), OSQP: An Operator Splitting Solver...
+
 #pragma once
 
 #include <Eigen/Core>
@@ -42,12 +60,14 @@ inline void scale_rows_inplace(SpMat& M, const Vec& s) {
     }
 }
 
-// ---------- Division-free LDLᵀ solve wrapper for Eigen::SimplicialLDLT
+/// Wrapper around Eigen::SimplicialLDLT for division-free solves.
+/// Caches L, P, invD to enable custom solve strategies (unused here;
+/// kept for compatibility and future refinement variants).
 struct LDLtDivFree {
     Eigen::SimplicialLDLT<SpMat> ldlt;
-    Vec invD;  // diag(D)^{-1}
-    Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic, int> P;
-    SpMat L;  // unit-lower
+    Vec invD;  /// diag(D)⁻¹ for D-scaling
+    Eigen::PermutationMatrix<Eigen::Dynamic, Eigen::Dynamic, int> P;  /// permutation P
+    SpMat L;  /// unit lower factor
     bool factorized = false;
 
     void compute(const SpMat& M) {
@@ -77,15 +97,15 @@ struct LDLtDivFree {
     }
 };
 
-// ---------- Quasi-definite KKT solver via SPD Schur complement (batched build)
-// ----------
-// ---------- Fast Quasi-definite KKT solver via sparse Schur complement
-// ----------
-// ---------- Fast KKT solver with cached factorizations and efficient rho
-// updates ----------
+/// Quasi-definite KKT system solver via cached Schur complement.
+/// Exploits structure: K = [H  Aᵀ] is quasi-definite (H > 0 on ker(A)).
+///                         [A -rho⁻¹I]
+/// Precomputes H⁻¹ and AHA = AH⁻¹Aᵀ; updates Schur S = AHA + diag(1/rho)
+/// numerically when rho changes (no symbolic reanalysis).
 class KKTQuasiDef {
    public:
-    // Build from P, A, rho, sigma - initial setup
+    /// Build KKT system: factorize H, cache AH⁻¹Aᵀ, build initial Schur.
+    /// Returns false if H or Schur factorization fails.
     bool build(const SpMat& P, const SpMat& A, const Vec& rho, Scalar sigma,
                Scalar diag_reg) {
         n_ = int(P.rows());
@@ -333,12 +353,12 @@ struct NEFast {
     Vec solve(const Vec& rhs) const { return ldlt.solve(rhs); }
 };
 
-// =============================== Settings ===============================
+/// Solver configuration and tuning parameters.
 struct Settings {
-    // ---- Algorithm params (OSQP-style defaults) ----
-    Scalar sigma = 1e-6;  // x-regularization
-    Scalar alpha = 1.6;   // over-relaxation
-    Scalar rho0 = 1e-1;   // base rho for inequalities
+    /// Algorithm hyperparameters (OSQP-style defaults)
+    Scalar sigma = 1e-6;  /// x-regularization (stabilizes H)
+    Scalar alpha = 1.6;   /// over-relaxation factor (1 < alpha < 2)
+    Scalar rho0 = 1e-1;   /// initial penalty on inequalities
 
     // Back-compat with bindings (mirror fields)
     Scalar rho =
@@ -385,25 +405,26 @@ struct Settings {
     Settings() = default;
 };
 
-// =============================== Results ===============================
+/// Convergence residuals: primal and dual infeasibilities.
 struct Residuals {
-    Scalar pri_inf = 0.0;  // ||Ax - z||_inf
-    Scalar dua_inf = 0.0;  // ||Px + q + A^T y||_inf
+    Scalar pri_inf = 0.0;  /// ‖Ax - z‖∞
+    Scalar dua_inf = 0.0;  /// ‖Px + q + Aᵀy‖∞
 };
 
+/// Solution and termination result.
 struct Result {
-    std::string status = "max_iter_reached";
-    int iters = 0;
-    Scalar obj_val = std::numeric_limits<Scalar>::quiet_NaN();
-    Vec x, z, y;
+    std::string status = "max_iter_reached";  /// "solved", "primal_infeasible", "dual_infeasible", "max_iter_reached", "factorization_failed"
+    int iters = 0;  /// iterations taken
+    Scalar obj_val = std::numeric_limits<Scalar>::quiet_NaN();  /// ½xᵀPx + qᵀx
+    Vec x, z, y;  /// primal, slack, dual variables
     Residuals res;
 
-    // Infeasibility certificates (optional)
+    /// Infeasibility certificates (certificates of unboundedness/infeasibility)
     bool primal_infeasible = false;
     bool dual_infeasible = false;
-    Vec y_cert, x_cert;  // dy and dx direction certificates
+    Vec y_cert, x_cert;  /// dy, dx direction certificates
 
-    // Optional polished x
+    /// Optional polished solution (improved by active-set refinement)
     std::optional<Vec> x_polish;
 };
 
@@ -645,7 +666,8 @@ inline Residuals compute_residuals_unscaled(const SpMat& Pbar,
     return {inf_norm(r_p), inf_norm(r_d)};
 }
 
-// ======================= Main Sparse OSQP-like Solver =======================
+/// Main sparse OSQP solver via ADMM.
+/// Handles general linear inequality constraints with optional scaling.
 class SparseOSQPSolver {
    public:
     explicit SparseOSQPSolver(Settings s = Settings{}) : cfg_(s) {
@@ -653,9 +675,10 @@ class SparseOSQPSolver {
         cfg_.rho0 = cfg_.rho;
     }
 
-    // Solve:
-    //   minimize 0.5 x^T P x + q^T x
-    //   s.t.     l <= A x <= u
+    /// Solve the QP:
+    ///   minimize  ½xᵀPx + qᵀx
+    ///   s.t.      l ≤ Ax ≤ u
+    /// Optional warm-start with x0, z0, y0. Returns Result with solution status.
     Result solve(const SpMat& P, const Vec& q, const SpMat& A, const Vec& l,
                  const Vec& u, const Vec* x0 = nullptr, const Vec* z0 = nullptr,
                  const Vec* y0 = nullptr) {
