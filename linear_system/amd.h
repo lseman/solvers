@@ -17,6 +17,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
+#include <string.h>      // C strings (memchr etc.) — needed before <cstring> on GCC 16
 #include <cstring>
 #include <iostream>
 #include <limits>

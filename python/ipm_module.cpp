@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "../ipm/IPSolver.h"
+#include "../ipm/sparse_solver.h"
 
 namespace nb = nanobind;
 
@@ -95,6 +96,12 @@ IPMSolution solve_ipm_dense(const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
 NB_MODULE(ipm_solver, m) {
     m.doc() = "simplinho IPM solver bindings (standalone, reusable across projects)";
 
+    nb::enum_<SparseSolver::SolverType>(m, "SolverType")
+        .value("LDLT", SparseSolver::SolverType::LDLT)
+        .value("SUPERNOODAL", SparseSolver::SolverType::SUPERNOODAL)
+        .value("FRONTAL", SparseSolver::SolverType::FRONTAL)
+        .export_values();
+
     nb::class_<IPMSolution>(m, "IPMSolution")
         .def_prop_ro("x", [](const IPMSolution& self) { return self.primals; })
         .def_prop_ro("primals",
@@ -108,20 +115,48 @@ NB_MODULE(ipm_solver, m) {
     nb::class_<IPSolver>(m, "IPSolver")
         .def(nb::init<>())
         .def(
+            "set_solver_type",
+            [](IPSolver &self, SparseSolver::SolverType type) {
+                self.ls.setSolverType(type);
+            },
+            nb::arg("type"),
+            "Set the sparse linear solver type (LDLT/SUPERNOODAL/FRONTAL). Call before solve().")
+        .def(
+            "get_solver_type",
+            [](const IPSolver &self) {
+                return self.ls.activeSolverType();
+            },
+            "Return the currently active solver type.")
+        .def(
             "solve",
-            [](IPSolver&, const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
+            [](IPSolver &self, const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
                const Eigen::VectorXd& c, const Eigen::VectorXd& lb, const Eigen::VectorXd& ub,
                nb::object sense,
-               double tol) { return solve_ipm_dense(A, b, c, lb, ub, std::move(sense), tol); },
+               double tol) {
+                Eigen::SparseMatrix<double> sparse_A = A.sparseView();
+                Eigen::VectorXd parsed_sense = parse_sense(std::move(sense), A.rows());
+                self.solve(sparse_A, b, c, lb, ub, parsed_sense, tol);
+                IPMSolution out{self.getPrimals(), self.getDuals(), self.getObjective(), "ipm"};
+                if (std::isfinite(out.objective)) return out;
+                out.status = "ipm_nonfinite";
+                return out;
+            },
             nb::arg("A"), nb::arg("b"), nb::arg("c"), nb::arg("lb"), nb::arg("ub"),
             nb::arg("sense") = nb::none(), nb::arg("tol") = 1e-8,
             "Solve min c^T x subject to A x =/<=/>= b and lb <= x <= ub (dense).")
         .def(
             "solve",
-            [](IPSolver&, const Eigen::SparseMatrix<double>& A, const Eigen::VectorXd& b,
+            [](IPSolver &self, const Eigen::SparseMatrix<double>& A, const Eigen::VectorXd& b,
                const Eigen::VectorXd& c, const Eigen::VectorXd& lb, const Eigen::VectorXd& ub,
                nb::object sense,
-               double tol) { return solve_ipm(A, b, c, lb, ub, std::move(sense), tol); },
+               double tol) {
+                Eigen::VectorXd parsed_sense = parse_sense(std::move(sense), A.rows());
+                self.solve(A, b, c, lb, ub, parsed_sense, tol);
+                IPMSolution out{self.getPrimals(), self.getDuals(), self.getObjective(), "ipm"};
+                if (std::isfinite(out.objective)) return out;
+                out.status = "ipm_nonfinite";
+                return out;
+            },
             nb::arg("A"), nb::arg("b"), nb::arg("c"), nb::arg("lb"), nb::arg("ub"),
             nb::arg("sense") = nb::none(), nb::arg("tol") = 1e-8,
             "Solve min c^T x subject to A x =/<=/>= b and lb <= x <= ub (sparse).");

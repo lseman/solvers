@@ -2,8 +2,9 @@
  * @file sparse_solver.h
  * @brief Hybrid sparse linear solver for IPM KKT systems.
  *
- * Provides SparseSolver wrapper with two factorization methods:
- * - CustomSimplicialLDLT (LDLT): Standard sparse LDL^T
+ * Provides SparseSolver wrapper with three factorization methods:
+ * - CustomSimplicialLDLT (LDLT): Standard sparse LDL^T (sorted-vector optimized)
+ * - SupernodalLDLT (SUPERNOODAL): Dense BLAS kernels on supernodes + sparse fallback
  * - FrontalLDLT (FRONTAL): Schur-complement frontal method (SOTA for structured)
  */
 
@@ -14,8 +15,9 @@
 #include <Eigen/SparseCholesky>
 #include <numeric>
 
-#include "LDLT.h"
+#include "../linear_system/eigen_addon/ldlt_eigen_interop.h"
 #include "../linear_system/schur_frontal_ldlt.h"
+#include "../linear_system/supernodal_ldlt.h"
 
 /**
  * @class SparseSolver
@@ -36,15 +38,17 @@ public:
 
   enum SolverType {
     LDLT,
+    SUPERNOODAL,
     FRONTAL,
   };
 
   SparseSolver(SolverType type = LDLT) : solverType(type) {
     switch (type) {
     case LDLT:
-      solver = new SolverWrapper<
-          Eigen::CustomSimplicialLDLT<Eigen::SparseMatrix<double>, Eigen::Lower,
-                                      Eigen::AMDOrdering<int>>>();
+      solver = new CustomLDLTWrapper();
+      break;
+    case SUPERNOODAL:
+      solver = new SupernodalLDLTWrapper();
       break;
     case FRONTAL:
       solver = new FrontalLDLTWrapper();
@@ -70,7 +74,29 @@ public:
   // Query active solver type
   SolverType activeSolverType() const { return solverType; }
   std::string solverName() const {
-    return solverType == LDLT ? "CustomSimplicialLDLT" : "FrontalLDLT";
+    switch (solverType) {
+    case LDLT:           return "CustomSimplicialLDLT";
+    case SUPERNOODAL:    return "SupernodalLDLT";
+    case FRONTAL:        return "FrontalLDLT";
+    }
+    return "unknown";
+  }
+
+  /** Switch active solver type. Call before factorize. */
+  void setSolverType(SolverType type) {
+    solverType = type;
+    reset();
+    switch (type) {
+    case LDLT:
+      solver = new CustomLDLTWrapper();
+      break;
+    case SUPERNOODAL:
+      solver = new SupernodalLDLTWrapper();
+      break;
+    case FRONTAL:
+      solver = new FrontalLDLTWrapper();
+      break;
+    }
   }
 
 private:
@@ -83,6 +109,67 @@ private:
     virtual ~SolverBase() = default;
     virtual void reset() = 0;
     virtual int info() = 0;
+  };
+
+  struct SupernodalLDLTWrapper : public SolverBase {
+    Eigen::SupernodalLDLT<Eigen::SparseMatrix<double>, Eigen::Lower,
+                           Eigen::AMDOrdering<int>> ldlt;
+    int info_code = 0;
+
+    void factorizeMatrix(const Eigen::SparseMatrix<double, Eigen::ColMajor, int>
+                             &matrix) override {
+      try {
+        ldlt.factorizeMatrix(matrix);
+        info_code = (ldlt.info() == Eigen::Success) ? 0 : 1;
+      } catch (...) {
+        info_code = 1;
+      }
+    }
+
+    Eigen::VectorXd solve(const Eigen::VectorXd &rhs) override {
+      if (info_code != 0 || rhs.size() != static_cast<int>(ldlt.size())) return rhs;
+      try {
+        return ldlt.solve(rhs);
+      } catch (...) {
+        return rhs;
+      }
+    }
+
+    void reset() override { ldlt.reset(); }
+
+    int info() override { return info_code; }
+  };
+
+  struct CustomLDLTWrapper : public SolverBase {
+    ldlt::SimplicialLDLT<double, int> ldlt;
+    int info_code = 0;
+
+    void factorizeMatrix(const Eigen::SparseMatrix<double, Eigen::ColMajor, int>
+                             &matrix) override {
+      try {
+        auto csc = ldlt::fromEigenSparse<double, int>(matrix);
+        ldlt.factorizeMatrix(csc);
+        info_code = ldlt.info();
+      } catch (...) {
+        info_code = 1;
+      }
+    }
+
+    Eigen::VectorXd solve(const Eigen::VectorXd &rhs) override {
+      if (info_code != 0 || rhs.size() != static_cast<int>(ldlt.size())) return rhs;
+      try {
+        return ldlt::solveEigen<double, int>(ldlt, rhs);
+      } catch (...) {
+        return rhs;
+      }
+    }
+
+    void reset() override {
+      ldlt = ldlt::SimplicialLDLT<double, int>();
+      info_code = 0;
+    }
+
+    int info() override { return info_code; }
   };
 
   struct FrontalLDLTWrapper : public SolverBase {
@@ -112,9 +199,11 @@ private:
           if (!should_merge || j == matrix.cols()) {
             int end_col = (j == matrix.cols()) ? j - 1 : j - 1;
             supernode_ranges.push_back({start_col, end_col});
-            for (int k = start_col; k <= end_col; ++k) col2sn[k] = sn_id;
+            for (int k = start_col; k <= end_col; ++k)
+              col2sn[k] = sn_id;
             sn_id++;
-            if (j < matrix.cols()) start_col = j;
+            if (j < matrix.cols())
+              start_col = j;
           }
         }
 
@@ -124,7 +213,8 @@ private:
           etree[j] = j + 1;
         }
 
-        ldlt = schur_frontal::build_and_factor_frontal(matrix, supernode_ranges, col2sn, etree);
+        ldlt = schur_frontal::build_and_factor_frontal(matrix, supernode_ranges,
+                                                       col2sn, etree);
         info_code = ldlt.factorized ? 0 : 1;
       } catch (...) {
         info_code = 1;
@@ -132,7 +222,8 @@ private:
     }
 
     Eigen::VectorXd solve(const Eigen::VectorXd &rhs) override {
-      if (!ldlt.factorized || rhs.size() != ldlt.n) return rhs;
+      if (!ldlt.factorized || rhs.size() != ldlt.n)
+        return rhs;
       try {
         std::vector<double> rhs_std(rhs.data(), rhs.data() + rhs.size());
         auto sol_std = schur_frontal::solve(ldlt, rhs_std);

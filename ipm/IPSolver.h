@@ -26,7 +26,7 @@
 #include <string>
 #include <vector>
 
-#include "LDLT.h"
+// #include "ldlt.h"
 #include "sparse_solver.h"
 
 /**
@@ -96,7 +96,6 @@ struct Residuals {
 OptimizationData extractOptimizationComponents(GRBModel &model);
 #endif
 OptimizationData convertToOptimizationData(const ModelData &modelData);
-
 
 /**
  * @brief Performs Ruiz scaling on the optimization problem data.
