@@ -51,6 +51,8 @@ Eigen::VectorXd parse_sense(nb::object sense, int rows) {
         for (int i = 0; i < rows; ++i) {
             if (tokens[i] == "=" || tokens[i] == "==") {
                 sense_vec(i) = 1.0;
+            } else if (tokens[i] == ">=" || tokens[i] == ">") {
+                sense_vec(i) = -1.0;
             }
         }
         return sense_vec;
