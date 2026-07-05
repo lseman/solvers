@@ -30,6 +30,9 @@
 #define LDLT_SIMD_WIDTH 1
 #endif
 
+#include <thread>
+#include <vector>
+
 namespace ldlt {
 
 // Cache prefetching
@@ -155,6 +158,39 @@ inline void simd_dense_axpy(double *__restrict__ x, double alpha,
 #endif
 
   for (; i < n; ++i) x[i] -= alpha * y[i];
+}
+
+// Parallel for loop: divides n iterations across hardware threads
+// Automatically serializes if n is small or only 1 thread available
+template <class F> inline void par_for_n(std::size_t n, F &&f) {
+  constexpr std::size_t min_parallel_size = 1000;
+
+  if (n < min_parallel_size) {
+    for (std::size_t i = 0; i < n; ++i) f(i);
+    return;
+  }
+
+  const auto num_threads = std::max(1u, std::thread::hardware_concurrency());
+  const auto chunk_size = (n + num_threads - 1) / num_threads;
+
+  if (num_threads > 1 && n > 2 * min_parallel_size) {
+    std::vector<std::thread> threads;
+    threads.reserve(num_threads);
+
+    for (unsigned t = 0; t < num_threads; ++t) {
+      threads.emplace_back([=]() {
+        const auto start = static_cast<std::size_t>(t) * chunk_size;
+        const auto end = std::min(start + chunk_size, n);
+        for (std::size_t i = start; i < end; ++i) {
+          f(i);
+        }
+      });
+    }
+
+    for (auto &thread : threads) thread.join();
+  } else {
+    for (std::size_t i = 0; i < n; ++i) f(i);
+  }
 }
 
 }  // namespace ldlt

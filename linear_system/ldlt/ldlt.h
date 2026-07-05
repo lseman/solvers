@@ -482,9 +482,10 @@ private:
                        reinterpret_cast<const double *>(d_inv.data()),
                        static_cast<size_t>(m_size));
     } else {
-      for (Index k = 0; k < m_size; ++k) {
-        x[static_cast<size_t>(k)] *= d_inv[static_cast<size_t>(k)];
-      }
+      // Parallel scale for non-double types (e.g., float)
+      par_for_n(static_cast<size_t>(m_size), [&](std::size_t k) {
+        x[k] *= d_inv[k];
+      });
     }
 
     // Backward solve: L^T x = z.
