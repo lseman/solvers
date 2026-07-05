@@ -1,0 +1,38 @@
+#ifndef LDLT_BK_EIGEN_INTEROP_H
+#define LDLT_BK_EIGEN_INTEROP_H
+
+// Eigen interop for Bunch-Kaufman LDL^T
+// Include this only if Eigen headers are available
+
+#include "ldlt_bk.h"
+#include <Eigen/Sparse>
+
+namespace ldlt {
+
+// Convert Eigen::SparseMatrix to standalone CSC
+template <typename Scalar, typename StorageIndex>
+inline SparseCSC<Scalar, int32_t> eigen_to_csc(
+    const Eigen::SparseMatrix<Scalar, Eigen::ColMajor, StorageIndex> &A) {
+  if (A.rows() != A.cols())
+    throw std::invalid_argument("Matrix must be square");
+
+  int32_t n = static_cast<int32_t>(A.rows());
+
+  std::vector<int32_t> Ap(static_cast<size_t>(n) + 1);
+  for (int32_t j = 0; j <= n; ++j)
+    Ap[static_cast<size_t>(j)] =
+        static_cast<int32_t>(A.outerIndexPtr()[static_cast<size_t>(j)]);
+
+  std::vector<int32_t> Ai(A.nonZeros());
+  for (int32_t i = 0; i < static_cast<int32_t>(A.nonZeros()); ++i)
+    Ai[static_cast<size_t>(i)] =
+        static_cast<int32_t>(A.innerIndexPtr()[static_cast<size_t>(i)]);
+
+  std::vector<Scalar> Ax(A.valuePtr(), A.valuePtr() + A.nonZeros());
+
+  return SparseCSC<Scalar, int32_t>(n, std::move(Ap), std::move(Ai), std::move(Ax));
+}
+
+} // namespace ldlt
+
+#endif // LDLT_BK_EIGEN_INTEROP_H

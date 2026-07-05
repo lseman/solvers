@@ -132,6 +132,16 @@ if(BUILD_LDLT)
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     list(APPEND SOLVER_TARGETS ldlt_ext)
+
+    nanobind_add_module(ldlt_bk_ext python/ldlt_bk_ext.cpp)
+    target_link_libraries(ldlt_bk_ext PRIVATE solvers_headers)
+    set_target_properties(
+        ldlt_bk_ext
+        PROPERTIES
+        OUTPUT_NAME ldlt_bk
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    list(APPEND SOLVER_TARGETS ldlt_bk_ext)
 endif()
 
 if(BUILD_IPM)
