@@ -146,6 +146,7 @@ inline std::vector<Real> BunchKaufmanLDLT::solveImpl(const std::vector<Real> &b)
   return b;  // Placeholder
 }
 
+
 } // namespace ldlt
 
 #endif // LDLT_BK_H
