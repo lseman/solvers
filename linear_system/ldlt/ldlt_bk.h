@@ -145,20 +145,18 @@ inline void BunchKaufmanLDLT::factorize(const MatrixType &A) {
 
   m_factors.D.clear();
   m_factors.block_info.assign(static_cast<size_t>(n), 0);  // 0=unused, 1=1x1, 2=2x2
-  m_factors.Lp.assign(static_cast<size_t>(n) + 1, 0);
-  m_factors.Li.clear();
-  m_factors.Lx.clear();
+  std::vector<std::vector<std::pair<Int, Real>>> L_cols(static_cast<size_t>(n));
 
   m_factors.num_pos = 0;
   m_factors.num_neg = 0;
   m_factors.num_zero = 0;
 
-  // Dense copy of A for in-place factorization (TODO: optimize for sparse)
+  // Dense copy of A for in-place factorization
   std::vector<Real> A_dense(static_cast<size_t>(n) * static_cast<size_t>(n), 0.0);
   for (Int j = 0; j < n; ++j) {
     for (Int p = A.Ap[static_cast<size_t>(j)]; p < A.Ap[static_cast<size_t>(j + 1)]; ++p) {
       Int i = A.Ai[static_cast<size_t>(p)];
-      if (i <= j) {  // Upper triangle
+      if (i <= j) {
         A_dense[static_cast<size_t>(j) * static_cast<size_t>(n) + static_cast<size_t>(i)] =
             A.Ax[static_cast<size_t>(p)];
         if (i != j)
@@ -168,80 +166,68 @@ inline void BunchKaufmanLDLT::factorize(const MatrixType &A) {
     }
   }
 
-  // Main factorization loop (Bunch-Kaufman algorithm)
+  // Main factorization loop (Bunch-Kaufman: 1x1 pivots only for now)
   Int k = 0;
   while (k < n) {
-    // Step 1: Find pivot (largest off-diagonal in remaining submatrix)
-    Real pivot_val = 0.0;
-    Int pivot_i = k, pivot_j = k;
-    for (Int i = k; i < n; ++i) {
-      for (Int j = i + 1; j < n; ++j) {
-        Real aij = std::abs(A_dense[static_cast<size_t>(j) * static_cast<size_t>(n) +
-                                     static_cast<size_t>(i)]);
-        if (aij > pivot_val) {
-          pivot_val = aij;
-          pivot_i = i;
-          pivot_j = j;
-        }
+    Real akk = A_dense[static_cast<size_t>(k) * static_cast<size_t>(n) + static_cast<size_t>(k)];
+
+    // 1x1 pivot
+    if (std::abs(akk) < m_pivot_tolerance) {
+      akk = (akk >= 0) ? m_pivot_tolerance : -m_pivot_tolerance;
+    }
+
+    m_factors.D.push_back(akk);
+    m_factors.block_info[static_cast<size_t>(k)] = 1;
+
+    if (akk > m_pivot_tolerance)
+      ++m_factors.num_pos;
+    else if (akk < -m_pivot_tolerance)
+      ++m_factors.num_neg;
+    else
+      ++m_factors.num_zero;
+
+    // Compute and store L[:, k] entries
+    for (Int i = k + 1; i < n; ++i) {
+      Real lij = A_dense[static_cast<size_t>(k) * static_cast<size_t>(n) + static_cast<size_t>(i)] / akk;
+      A_dense[static_cast<size_t>(k) * static_cast<size_t>(n) + static_cast<size_t>(i)] = lij;
+      if (std::abs(lij) > m_pivot_tolerance) {
+        L_cols[static_cast<size_t>(k)].emplace_back(i, lij);
       }
     }
 
-    // Step 2: Extract diagonal elements for decision
-    Real akk = A_dense[static_cast<size_t>(k) * static_cast<size_t>(n) + static_cast<size_t>(k)];
-
-    if (pivot_val < m_pivot_tolerance || k == n - 1) {
-      // Use 1x1 pivot at (k, k)
-      if (std::abs(akk) < m_pivot_tolerance) {
-        akk = (akk >= 0) ? m_pivot_tolerance : -m_pivot_tolerance;
+    // Update Schur complement: A[i,j] -= L[i,k] * D[k] * L[j,k]
+    for (Int i = k + 1; i < n; ++i) {
+      for (Int j = i; j < n; ++j) {
+        Real update = A_dense[static_cast<size_t>(k) * static_cast<size_t>(n) + static_cast<size_t>(i)] *
+                      akk *
+                      A_dense[static_cast<size_t>(k) * static_cast<size_t>(n) + static_cast<size_t>(j)];
+        A_dense[static_cast<size_t>(j) * static_cast<size_t>(n) + static_cast<size_t>(i)] -= update;
+        if (i != j)
+          A_dense[static_cast<size_t>(i) * static_cast<size_t>(n) + static_cast<size_t>(j)] -= update;
       }
+    }
 
-      m_factors.D.push_back(akk);
-      m_factors.block_info[static_cast<size_t>(k)] = 1;
+    k++;
+  }
 
-      if (akk > m_pivot_tolerance)
-        ++m_factors.num_pos;
-      else if (akk < -m_pivot_tolerance)
-        ++m_factors.num_neg;
-      else
-        ++m_factors.num_zero;
+  // Convert L_cols to CSC format
+  m_factors.Lp.assign(static_cast<size_t>(n) + 1, 0);
+  m_factors.Lp[0] = 0;
+  for (Int j = 0; j < n; ++j) {
+    m_factors.Lp[static_cast<size_t>(j) + 1] =
+        m_factors.Lp[static_cast<size_t>(j)] +
+        static_cast<Int>(L_cols[static_cast<size_t>(j)].size());
+  }
 
-      // Factor L entries
-      for (Int i = k + 1; i < n; ++i) {
-        A_dense[static_cast<size_t>(k) * static_cast<size_t>(n) + static_cast<size_t>(i)] /= akk;
-      }
+  m_factors.Li.clear();
+  m_factors.Lx.clear();
+  m_factors.Li.reserve(m_factors.Lp[static_cast<size_t>(n)]);
+  m_factors.Lx.reserve(m_factors.Lp[static_cast<size_t>(n)]);
 
-      // Update Schur complement
-      for (Int i = k + 1; i < n; ++i) {
-        for (Int j = i; j < n; ++j) {
-          A_dense[static_cast<size_t>(j) * static_cast<size_t>(n) + static_cast<size_t>(i)] -=
-              A_dense[static_cast<size_t>(k) * static_cast<size_t>(n) + static_cast<size_t>(i)] *
-              akk *
-              A_dense[static_cast<size_t>(k) * static_cast<size_t>(n) + static_cast<size_t>(j)];
-          if (i != j)
-            A_dense[static_cast<size_t>(i) * static_cast<size_t>(n) + static_cast<size_t>(j)] =
-                A_dense[static_cast<size_t>(j) * static_cast<size_t>(n) + static_cast<size_t>(i)];
-        }
-      }
-
-      k++;
-    } else {
-      // Use 2x2 pivot at (pivot_i, pivot_j)
-      // TODO: Implement 2x2 pivot handling (swap, factor 2x2 block, update Schur complement)
-      // For now, fall back to 1x1
-      if (std::abs(akk) < m_pivot_tolerance) {
-        akk = (akk >= 0) ? m_pivot_tolerance : -m_pivot_tolerance;
-      }
-      m_factors.D.push_back(akk);
-      m_factors.block_info[static_cast<size_t>(k)] = 1;
-
-      if (akk > m_pivot_tolerance)
-        ++m_factors.num_pos;
-      else if (akk < -m_pivot_tolerance)
-        ++m_factors.num_neg;
-      else
-        ++m_factors.num_zero;
-
-      k++;
+  for (Int j = 0; j < n; ++j) {
+    for (const auto &entry : L_cols[static_cast<size_t>(j)]) {
+      m_factors.Li.push_back(entry.first);
+      m_factors.Lx.push_back(entry.second);
     }
   }
 
@@ -249,9 +235,41 @@ inline void BunchKaufmanLDLT::factorize(const MatrixType &A) {
 }
 
 inline std::vector<Real> BunchKaufmanLDLT::solveImpl(const std::vector<Real> &b) const {
-  // TODO: Implement forward/diagonal/backward solve with block diagonal D
-  // For now, return b as stub
-  return b;
+  const Int n = m_factors.n;
+  if (n == 0) return {};
+
+  std::vector<Real> x = b;
+
+  // Forward solve: L y = x (L is unit lower, stored by column)
+  // Column j of L has entries L[i,j] for i > j
+  for (Int j = 0; j < n; ++j) {
+    Int p0 = m_factors.Lp[static_cast<size_t>(j)];
+    Int p1 = m_factors.Lp[static_cast<size_t>(j) + 1];
+    for (Int p = p0; p < p1; ++p) {
+      Int i = m_factors.Li[static_cast<size_t>(p)];
+      x[static_cast<size_t>(i)] -= m_factors.Lx[static_cast<size_t>(p)] * x[static_cast<size_t>(j)];
+    }
+  }
+
+  // Diagonal solve: D z = y (1x1 blocks only for now)
+  for (Int k = 0; k < static_cast<Int>(m_factors.D.size()); ++k) {
+    if (m_factors.D[static_cast<size_t>(k)] != 0.0) {
+      x[static_cast<size_t>(k)] /= m_factors.D[static_cast<size_t>(k)];
+    }
+  }
+
+  // Backward solve: L^T x = z
+  // Column j of L has entries L[i,j] for i > j; L^T has entries L[j,i]
+  for (Int j = n - 1; j >= 0; --j) {
+    Int p0 = m_factors.Lp[static_cast<size_t>(j)];
+    Int p1 = m_factors.Lp[static_cast<size_t>(j) + 1];
+    for (Int p = p0; p < p1; ++p) {
+      Int i = m_factors.Li[static_cast<size_t>(p)];
+      x[static_cast<size_t>(j)] -= m_factors.Lx[static_cast<size_t>(p)] * x[static_cast<size_t>(i)];
+    }
+  }
+
+  return x;
 }
 
 
