@@ -87,104 +87,74 @@ inline void simd_scale_array(double *__restrict__ x,
   for (; i < n; ++i) x[i] *= scale[i];
 }
 
-// SIMD: vector subtraction (result = a - b)
-inline void simd_vector_sub(double *__restrict__ result,
-                            const double *__restrict__ a,
-                            const double *__restrict__ b, size_t n) {
-  size_t i = 0;
-
-#if LDLT_HAS_AVX512
-  const size_t simd_end = n - (n % 8);
-  for (; i < simd_end; i += 8) {
-    __m512d va = _mm512_loadu_pd(&a[i]);
-    __m512d vb = _mm512_loadu_pd(&b[i]);
-    __m512d vr = _mm512_sub_pd(va, vb);
-    _mm512_storeu_pd(&result[i], vr);
+// SIMD: sparse multiply-accumulate for factorization kernels
+// Computes: x[rows[i]] -= scale * vals[i] for contiguous i
+// Used in forward/backward solves for small dense segments
+inline void simd_sparse_macc(double *__restrict__ x,
+                             const int32_t *__restrict__ rows,
+                             const double *__restrict__ vals, size_t n,
+                             double scale) {
+#if LDLT_HAS_AVX2
+  const size_t prefetch_dist = 4;
+  for (size_t i = 0; i < n; ++i) {
+    if (i + prefetch_dist < n) {
+      const int32_t future_row = rows[i + prefetch_dist];
+      if (future_row >= 0) {
+        prefetch_write(&x[static_cast<size_t>(future_row)]);
+      }
+    }
+    const int32_t j = rows[i];
+    if (j >= 0) {
+      x[static_cast<size_t>(j)] -= scale * vals[i];
+    }
   }
-#elif LDLT_HAS_AVX2
-  const size_t simd_end = n - (n % 4);
-  for (; i < simd_end; i += 4) {
-    __m256d va = _mm256_loadu_pd(&a[i]);
-    __m256d vb = _mm256_loadu_pd(&b[i]);
-    __m256d vr = _mm256_sub_pd(va, vb);
-    _mm256_storeu_pd(&result[i], vr);
-  }
-#endif
-
-  for (; i < n; ++i) result[i] = a[i] - b[i];
-}
-
-// SIMD: vector addition (result = a + b)
-inline void simd_vector_add(double *__restrict__ result,
-                            const double *__restrict__ a,
-                            const double *__restrict__ b, size_t n) {
-  size_t i = 0;
-
-#if LDLT_HAS_AVX512
-  const size_t simd_end = n - (n % 8);
-  for (; i < simd_end; i += 8) {
-    __m512d va = _mm512_loadu_pd(&a[i]);
-    __m512d vb = _mm512_loadu_pd(&b[i]);
-    __m512d vr = _mm512_add_pd(va, vb);
-    _mm512_storeu_pd(&result[i], vr);
-  }
-#elif LDLT_HAS_AVX2
-  const size_t simd_end = n - (n % 4);
-  for (; i < simd_end; i += 4) {
-    __m256d va = _mm256_loadu_pd(&a[i]);
-    __m256d vb = _mm256_loadu_pd(&b[i]);
-    __m256d vr = _mm256_add_pd(va, vb);
-    _mm256_storeu_pd(&result[i], vr);
+#else
+  for (size_t i = 0; i < n; ++i) {
+    const int32_t j = rows[i];
+    if (j >= 0) {
+      x[static_cast<size_t>(j)] -= scale * vals[i];
+    }
   }
 #endif
-
-  for (; i < n; ++i) result[i] = a[i] + b[i];
 }
 
-// SIMD: dot product (sum of a[i]*b[i])
-inline double simd_dot_product(const double *__restrict__ a,
-                               const double *__restrict__ b, size_t n) {
-  double sum = 0.0;
+// SIMD: dense segment accumulation (contiguous scatter for column ops)
+// Computes: x[k:k+n] -= alpha * y[p0:p1] where access is sequential
+// Useful for dense frontal blocks in supernodal factorization
+inline void simd_dense_axpy(double *__restrict__ x, double alpha,
+                            const double *__restrict__ y, size_t n) {
   size_t i = 0;
 
 #if LDLT_HAS_AVX512
-  __m512d vsum = _mm512_setzero_pd();
   const size_t simd_end = n - (n % 8);
+  __m512d valpha = _mm512_set1_pd(-alpha);
   for (; i < simd_end; i += 8) {
-    __m512d va = _mm512_loadu_pd(&a[i]);
-    __m512d vb = _mm512_loadu_pd(&b[i]);
-    vsum = _mm512_fmadd_pd(va, vb, vsum);
+    __m512d vy = _mm512_loadu_pd(&y[i]);
+    __m512d vx = _mm512_loadu_pd(&x[i]);
+    vx = _mm512_fmadd_pd(valpha, vy, vx);
+    _mm512_storeu_pd(&x[i], vx);
   }
-  sum = _mm512_reduce_add_pd(vsum);
 #elif LDLT_HAS_AVX2
-  __m256d vsum = _mm256_setzero_pd();
   const size_t simd_end = n - (n % 4);
+  __m256d valpha = _mm256_set1_pd(-alpha);
   for (; i < simd_end; i += 4) {
-    __m256d va = _mm256_loadu_pd(&a[i]);
-    __m256d vb = _mm256_loadu_pd(&b[i]);
-    vsum = _mm256_fmadd_pd(va, vb, vsum);
+    __m256d vy = _mm256_loadu_pd(&y[i]);
+    __m256d vx = _mm256_loadu_pd(&x[i]);
+    vx = _mm256_fmadd_pd(valpha, vy, vx);
+    _mm256_storeu_pd(&x[i], vx);
   }
-  __m128d sum_low = _mm256_castpd256_pd128(vsum);
-  __m128d sum_high = _mm256_extractf128_pd(vsum, 1);
-  sum_low = _mm_add_pd(sum_low, sum_high);
-  sum_low = _mm_hadd_pd(sum_low, sum_low);
-  sum = _mm_cvtsd_f64(sum_low);
 #elif LDLT_HAS_SSE2
-  __m128d vsum = _mm_setzero_pd();
   const size_t simd_end = n - (n % 2);
   for (; i < simd_end; i += 2) {
-    __m128d va = _mm_loadu_pd(&a[i]);
-    __m128d vb = _mm_loadu_pd(&b[i]);
-    __m128d vp = _mm_mul_pd(va, vb);
-    vsum = _mm_add_pd(vsum, vp);
+    __m128d vy = _mm_loadu_pd(&y[i]);
+    __m128d vx = _mm_loadu_pd(&x[i]);
+    __m128d vprod = _mm_mul_pd(vy, _mm_set1_pd(-alpha));
+    vx = _mm_add_pd(vx, vprod);
+    _mm_storeu_pd(&x[i], vx);
   }
-  __m128d temp = _mm_shuffle_pd(vsum, vsum, 1);
-  vsum = _mm_add_sd(vsum, temp);
-  sum = _mm_cvtsd_f64(vsum);
 #endif
 
-  for (; i < n; ++i) sum += a[i] * b[i];
-  return sum;
+  for (; i < n; ++i) x[i] -= alpha * y[i];
 }
 
 }  // namespace ldlt

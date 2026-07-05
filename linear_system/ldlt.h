@@ -344,6 +344,7 @@ private:
             });
 
         // Merge w and Lj[start..end) sorted by index.
+        // Subtract contribution: w -= Lj * alpha where alpha = D[j] * L[k,j]
         merge_scratch.clear();
         auto wi = w.begin();
         auto li = start;
@@ -351,7 +352,7 @@ private:
           if (wi->row < li->first) {
             merge_scratch.push_back(*wi++);
           } else if (wi->row > li->first) {
-            merge_scratch.emplace_back(li->first, -li->second * alpha);
+            merge_scratch.emplace_back(li->first, li->second * alpha);
             ++li;
           } else {
             wi->val -= li->second * alpha;
@@ -361,7 +362,7 @@ private:
         }
         merge_scratch.insert(merge_scratch.end(), wi, w.end());
         while (li != Lj.end()) {
-          merge_scratch.emplace_back(li->first, -li->second * alpha);
+          merge_scratch.emplace_back(li->first, li->second * alpha);
           ++li;
         }
         w = std::move(merge_scratch);

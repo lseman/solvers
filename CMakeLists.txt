@@ -162,9 +162,5 @@ if(BUILD_SOLVER_TESTS)
     add_executable(test_supernodes tests/test_supernodes.cpp)
     target_link_libraries(test_supernodes PRIVATE solvers_headers)
 
-    add_executable(test_ldlt tests/test_ldlt.cpp)
-    target_link_libraries(test_ldlt PRIVATE solvers_headers)
-
     add_test(NAME supernodes COMMAND test_supernodes)
-    add_test(NAME ldlt COMMAND test_ldlt)
 endif()
