@@ -15,9 +15,9 @@
 #include <Eigen/SparseCholesky>
 #include <numeric>
 
-#include "../linear_system/ldlt/ldlt_eigen_interop.h"
-#include "../linear_system/schur/schur_frontal_eigen_interop.h"
-#include "../linear_system/supernodal_eigen_interop.h"
+#include "../linear_system/eigen_interop/ldlt_eigen_interop.h"
+#include "../linear_system/eigen_interop/schur_frontal_eigen_interop.h"
+#include "../linear_system/eigen_interop/supernodal_eigen_interop.h"
 
 /**
  * @class SparseSolver

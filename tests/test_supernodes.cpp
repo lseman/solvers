@@ -1,5 +1,5 @@
-#include "linear_system/supernodal_ldlt.h"
-#include "linear_system/supernodal_eigen_interop.h"
+#include "linear_system/ldlt/supernodal_ldlt.h"
+#include "linear_system/eigen_interop/supernodal_eigen_interop.h"
 #include "linear_system/supernodes.h"
 
 #include <Eigen/Dense>

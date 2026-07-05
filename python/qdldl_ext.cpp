@@ -8,20 +8,20 @@ namespace nb = nanobind;
 
 namespace {
 
-using DenseMatrix = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+using DenseMatrix = Eigen::Matrix< double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor >;
 
-qdldl23::SparseD32 dense_upper_to_csc(const Eigen::Ref<const DenseMatrix>& A) {
+qdldl23::SparseD32 dense_upper_to_csc(const Eigen::Ref< const DenseMatrix >& A) {
     if (A.rows() != A.cols()) {
         throw std::invalid_argument("A must be square");
     }
 
-    const int n = static_cast<int>(A.rows());
-    std::vector<int32_t> Ap(static_cast<size_t>(n) + 1, 0);
-    std::vector<int32_t> Ai;
-    std::vector<double> Ax;
+    const int n = static_cast< int >(A.rows());
+    std::vector< int32_t > Ap(static_cast< size_t >(n) + 1, 0);
+    std::vector< int32_t > Ai;
+    std::vector< double > Ax;
 
     for (int j = 0; j < n; ++j) {
-        Ap[static_cast<size_t>(j)] = static_cast<int32_t>(Ai.size());
+        Ap[static_cast< size_t >(j)] = static_cast< int32_t >(Ai.size());
         for (int i = 0; i <= j; ++i) {
             const double value = A(i, j);
             if (value != 0.0 || i == j) {
@@ -30,13 +30,19 @@ qdldl23::SparseD32 dense_upper_to_csc(const Eigen::Ref<const DenseMatrix>& A) {
             }
         }
     }
-    Ap[static_cast<size_t>(n)] = static_cast<int32_t>(Ai.size());
+    Ap[static_cast< size_t >(n)] = static_cast< int32_t >(Ai.size());
 
-    return qdldl23::SparseD32(n, std::move(Ap), std::move(Ai), std::move(Ax));
+    qdldl23::SparseD32 mat;
+    mat.n = n;
+    mat.Ap = std::move(Ap);
+    mat.Ai = std::move(Ai);
+    mat.Ax = std::move(Ax);
+    linsys::finalize_upper_inplace(mat);
+    return mat;
 }
 
-nb::dict solve_dense(const Eigen::Ref<const DenseMatrix>& A,
-                     const Eigen::Ref<const Eigen::VectorXd>& b) {
+nb::dict solve_dense(const Eigen::Ref< const DenseMatrix >& A,
+                     const Eigen::Ref< const Eigen::VectorXd >& b) {
     auto csc = dense_upper_to_csc(A);
     if (b.size() != csc.n) {
         throw std::invalid_argument("b dimension mismatch");
@@ -55,7 +61,7 @@ nb::dict solve_dense(const Eigen::Ref<const DenseMatrix>& A,
     return out;
 }
 
-}  // namespace
+} // namespace
 
 NB_MODULE(qdldl, m) {
     m.doc() = "nanobind wrappers for QDLDL-style sparse LDLT factorization";

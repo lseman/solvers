@@ -19,9 +19,9 @@
 #ifndef SUPERSONAL_EIGEN_INTEROP_H
 #define SUPERSONAL_EIGEN_INTEROP_H
 
-#include "supernodal_ldlt.h"
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
+#include "../ldlt/supernodal_ldlt.h"
 
 namespace supernodal {
 
@@ -29,20 +29,22 @@ namespace supernodal {
 
 /// Convert Eigen::SparseMatrix (column-major) to standalone SparseCSC.
 template < typename Scalar, typename Index >
-inline SparseCSC< Scalar, Index > eigen_to_csc(
-    const Eigen::SparseMatrix< Scalar, Eigen::ColMajor, Index >& A) {
+inline SparseCSC< Scalar, Index >
+eigen_to_csc(const Eigen::SparseMatrix< Scalar, Eigen::ColMajor, Index >& A) {
     if (A.rows() != A.cols()) {
         throw std::invalid_argument("supernodal: Matrix must be square");
     }
 
     Index n = static_cast< Index >(A.rows());
-    SparseCSC< Scalar, Index > csc(n);
-
+    SparseCSC< Scalar, Index > csc;
+    csc.n = n;
     csc.Ap.assign(A.outerIndexPtr(), A.outerIndexPtr() + n + 1);
-    for (auto& p : csc.Ap) p = static_cast< Index >(p);
+    for (auto& p : csc.Ap)
+        p = static_cast< Index >(p);
 
     csc.Ai.assign(A.innerIndexPtr(), A.innerIndexPtr() + A.nonZeros());
-    for (auto& i : csc.Ai) i = static_cast< Index >(i);
+    for (auto& i : csc.Ai)
+        i = static_cast< Index >(i);
 
     csc.Ax.assign(A.valuePtr(), A.valuePtr() + A.nonZeros());
 
@@ -59,8 +61,8 @@ csc_to_eigen(const SparseCSC< Scalar, Index >& csc) {
     trips.reserve(static_cast< size_t >(csc.nnz()));
 
     for (Index j = 0; j < csc.n; ++j) {
-        for (Index p = csc.Ap[static_cast< size_t >(j)];
-             p < csc.Ap[static_cast< size_t >(j) + 1]; ++p) {
+        for (Index p = csc.Ap[static_cast< size_t >(j)]; p < csc.Ap[static_cast< size_t >(j) + 1];
+             ++p) {
             Index i = csc.Ai[static_cast< size_t >(p)];
             Scalar v = csc.Ax[static_cast< size_t >(p)];
             trips.emplace_back(i, j, v);
@@ -75,9 +77,8 @@ csc_to_eigen(const SparseCSC< Scalar, Index >& csc) {
 
 /// Solve Ax = b using standalone SupernodalLDLT with Eigen vectors.
 template < typename Scalar, typename Index >
-inline Eigen::VectorXd solveEigen(
-    const SupernodalLDLT< Scalar, Index >& solver,
-    const Eigen::VectorXd& b) {
+inline Eigen::VectorXd solveEigen(const SupernodalLDLT< Scalar, Index >& solver,
+                                  const Eigen::VectorXd& b) {
     if (static_cast< Index >(b.size()) != solver.size()) {
         throw std::invalid_argument("supernodal: rhs size mismatch");
     }

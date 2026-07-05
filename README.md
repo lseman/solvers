@@ -69,7 +69,9 @@ Requires: C++20 or later, Eigen 3.4+ (for QP solvers)
 using namespace qdldl23;
 
 // Assemble upper-triangular CSC matrix
-SparseD32 A(n, Ap, Ai, Ax);  // n×n, upper+diag
+SparseD32 A;
+A.n = n; A.Ap = std::move(Ap); A.Ai = std::move(Ai); A.Ax = std::move(Ax);
+finalize_upper_inplace(A);  // coalesce dupes, check upper+diag
 
 // Symbolic analysis
 auto S = analyze_fast(A);

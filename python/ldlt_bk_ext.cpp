@@ -1,4 +1,4 @@
-#include "linear_system/ldlt/ldlt_bk_eigen_interop.h"
+#include "linear_system/eigen_interop/ldlt_bk_eigen_interop.h"
 
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
