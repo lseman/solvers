@@ -41,7 +41,7 @@
 // amd.h must be in global scope: it includes <iostream> which references C
 // symbols (::memchr, ::__libc_single_threaded etc.) that would otherwise
 // resolve to ldlt:: inside the namespace block.
-#include "amd.h"
+#include "../amd.h"
 
 namespace ldlt {
 

@@ -15,8 +15,7 @@
 #include <Eigen/SparseCholesky>
 #include <numeric>
 
-#include "../linear_system/eigen_addon/ldlt_eigen_interop.h"
-#include "../linear_system/schur_frontal_ldlt.h"
+#include "../linear_system/ldlt/ldlt_eigen_interop.h"
 #include "../linear_system/supernodal_ldlt.h"
 
 /**
@@ -51,7 +50,8 @@ public:
       solver = new SupernodalLDLTWrapper();
       break;
     case FRONTAL:
-      solver = new FrontalLDLTWrapper();
+      // FrontalLDLTWrapper disabled during refactor
+      solver = new CustomLDLTWrapper();  // fallback to LDLT
       break;
     }
   }
@@ -94,7 +94,8 @@ public:
       solver = new SupernodalLDLTWrapper();
       break;
     case FRONTAL:
-      solver = new FrontalLDLTWrapper();
+      // FrontalLDLTWrapper disabled during refactor
+      solver = new CustomLDLTWrapper();  // fallback to LDLT
       break;
     }
   }
@@ -172,7 +173,8 @@ private:
     int info() override { return info_code; }
   };
 
-  struct FrontalLDLTWrapper : public SolverBase {
+  // FrontalLDLTWrapper disabled during refactor: Schur frontal API extraction in progress
+  /* struct FrontalLDLTWrapper : public SolverBase {
     schur_frontal::FrontalLDLT ldlt;
     int info_code = 0;
 
@@ -239,7 +241,7 @@ private:
     }
 
     int info() override { return info_code; }
-  };
+  }; */
 
   template <typename Solver> struct SolverWrapper : public SolverBase {
     Solver solver;

@@ -6,7 +6,7 @@
 
 #pragma once
 
-#include "../schur_frontal_ldlt_standalone.h"
+#include "schur_frontal_ldlt.h"
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 

@@ -5,7 +5,7 @@
 // Include this header ONLY if Eigen is available. ldlt.h core itself is Eigen-free.
 // Usage: #include <ldlt_eigen_interop.h>  (requires Eigen headers already included)
 
-#include "../ldlt.h"
+#include "ldlt.h"
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 

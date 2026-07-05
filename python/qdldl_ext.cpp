@@ -1,4 +1,4 @@
-#include "linear_system/qdldl.h"
+#include "linear_system/qdldl/qdldl.h"
 
 #include <nanobind/eigen/dense.h>
 #include <nanobind/nanobind.h>
