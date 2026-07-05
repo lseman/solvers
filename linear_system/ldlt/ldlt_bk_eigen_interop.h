@@ -5,6 +5,7 @@
 // Include this only if Eigen headers are available
 
 #include "ldlt_bk.h"
+#include <Eigen/Dense>
 #include <Eigen/Sparse>
 
 namespace ldlt {
@@ -31,6 +32,14 @@ inline SparseCSC<Scalar, int32_t> eigen_to_csc(
   std::vector<Scalar> Ax(A.valuePtr(), A.valuePtr() + A.nonZeros());
 
   return SparseCSC<Scalar, int32_t>(n, std::move(Ap), std::move(Ai), std::move(Ax));
+}
+
+// Convert dense Eigen matrix to CSC (sparseView then eigen_to_csc)
+template <typename Scalar, typename Index>
+inline SparseCSC<Scalar, int32_t> fromDense(
+    const Eigen::Matrix<Scalar, -1, -1> &mat) {
+  Eigen::SparseMatrix<Scalar> sparse = mat.sparseView(Scalar(0.0), Scalar(0.0));
+  return eigen_to_csc(sparse);
 }
 
 } // namespace ldlt

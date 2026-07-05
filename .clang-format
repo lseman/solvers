@@ -1,0 +1,67 @@
+Language: Cpp
+BasedOnStyle: LLVM
+
+# Indentation
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 4
+
+# Column limits
+ColumnLimit: 100
+
+# Spaces
+SpaceAfterCStyleCast: false
+SpaceAfterTemplateKeyword: true
+SpaceBeforeAssignmentOperators: true
+SpacesInAngles: true
+SpacesInContainerLiterals: true
+SpaceBeforeCpp11BracedList: false
+SpaceBeforeParens: ControlStatements
+SpaceBeforeRangeBasedForLoopColon: true
+
+# Pointer/Reference alignment
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# Braces
+AllowAllArgumentsOnNextLine: false
+AllowAllParametersOfDeclarationOnNextLine: false
+BreakBeforeBraces: Attach
+CompactNamespaces: false
+
+# Lines
+AllowShortBlocksOnASingleLine: Never
+AllowShortCaseLabelsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLambdasOnASingleLine: All
+AllowShortLoopsOnASingleLine: false
+AlwaysBreakBeforeMultilineStrings: false
+
+# Comments
+IndentWrappedFunctionNames: false
+
+# Namespace
+AllowShortNamespacesOnASingleLine: false
+
+# Binary operators
+BreakBeforeBinaryOperators: None
+BreakBeforeTernaryOperators: true
+
+# Sort includes (modern organization)
+SortIncludes: CaseInsensitive
+IncludeBlocks: Preserve
+IncludeCategories:
+  - Regex: '^"(llvm|llvm-c|clang|clang-c)/'
+    Priority: 1
+  - Regex: '^<.*\.h>'
+    Priority: 2
+  - Regex: '^<[^"]+\.h>'
+    Priority: 3
+  - Regex: '^<'
+    Priority: 4
+  - Regex: '^"'
+    Priority: 5
+  - Regex: ''
+    Priority: 6

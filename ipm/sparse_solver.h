@@ -17,7 +17,7 @@
 
 #include "../linear_system/ldlt/ldlt_eigen_interop.h"
 #include "../linear_system/schur/schur_frontal_eigen_interop.h"
-#include "../linear_system/supernodal_ldlt.h"
+#include "../linear_system/supernodal_eigen_interop.h"
 
 /**
  * @class SparseSolver
@@ -112,15 +112,14 @@ private:
   };
 
   struct SupernodalLDLTWrapper : public SolverBase {
-    Eigen::SupernodalLDLT<Eigen::SparseMatrix<double>, Eigen::Lower,
-                           Eigen::AMDOrdering<int>> ldlt;
+    supernodal::SupernodalLDLT<double, int> ldlt;
     int info_code = 0;
 
     void factorizeMatrix(const Eigen::SparseMatrix<double, Eigen::ColMajor, int>
                              &matrix) override {
       try {
-        ldlt.factorizeMatrix(matrix);
-        info_code = (ldlt.info() == Eigen::Success) ? 0 : 1;
+        supernodal::factorizeEigen(ldlt, matrix);
+        info_code = ldlt.info();
       } catch (...) {
         info_code = 1;
       }
@@ -129,7 +128,7 @@ private:
     Eigen::VectorXd solve(const Eigen::VectorXd &rhs) override {
       if (info_code != 0 || rhs.size() != static_cast<int>(ldlt.size())) return rhs;
       try {
-        return ldlt.solve(rhs);
+        return supernodal::solveEigen(ldlt, rhs);
       } catch (...) {
         return rhs;
       }

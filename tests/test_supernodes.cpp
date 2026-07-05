@@ -1,4 +1,5 @@
 #include "linear_system/supernodal_ldlt.h"
+#include "linear_system/supernodal_eigen_interop.h"
 #include "linear_system/supernodes.h"
 
 #include <Eigen/Dense>
@@ -189,16 +190,15 @@ void runEigenCase(const std::string &testName, int n,
                   const Ranges &denseBlocks,
                   const Ranges &expectedRanges) {
   const SpMat A = makeBlockSpd(n, denseBlocks);
-  Eigen::SupernodalLDLT<SpMat, Eigen::Lower, Eigen::NaturalOrdering<int>>
-      solver;
-  solver.compute(A);
+  supernodal::SupernodalLDLT<double, int> solver;
+  supernodal::computeEigen(solver, A);
 
-  expectRanges(testName, solver.get_ranges(), expectedRanges);
-  expectEqual(testName, solver.get_etree(), denseBlockEtree(n, denseBlocks),
+  expectRanges(testName, solver.supernodeRanges(), expectedRanges);
+  expectEqual(testName, solver.etree(), denseBlockEtree(n, denseBlocks),
               "computed etree");
 
   Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(n, 1.0, static_cast<double>(n));
-  Eigen::VectorXd x = solver.solve(b);
+  Eigen::VectorXd x = supernodal::solveEigen(solver, b);
   const double relativeResidual =
       (A * x - b).norm() / std::max(1.0, b.norm());
   if (!std::isfinite(relativeResidual) || relativeResidual > 1e-12) {

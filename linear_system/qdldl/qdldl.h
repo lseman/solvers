@@ -38,6 +38,7 @@
 #define QDLDL23_HAS_STDEXEC 0
 #endif
 
+#include "../common/ordering.h"
 #include "qdldl_simd.h"
 
 namespace qdldl23 {
@@ -169,55 +170,9 @@ class SparseUpperCSC {
 };
 
 // --------- Ordering (perm/iperm) ----------
-template <std::signed_integral IntT = int32_t>
-struct Ordering {
-    std::vector<IntT> perm;   // size n, maps old->new
-    std::vector<IntT> iperm;  // size n, maps new->old
-    IntT n{0};
-
-    static Ordering identity(IntT n) {
-        Ordering o;
-        o.n = n;
-        o.perm.resize(static_cast<size_t>(n));
-        o.iperm.resize(static_cast<size_t>(n));
-        std::iota(o.perm.begin(), o.perm.end(), IntT{0});
-        std::iota(o.iperm.begin(), o.iperm.end(), IntT{0});
-        return o;
-    }
-
-    static Ordering from_perm(std::vector<IntT> p) {
-        Ordering o;
-        o.n = static_cast<IntT>(p.size());
-        o.perm = std::move(p);
-        o.iperm.assign(static_cast<size_t>(o.n), IntT{-1});
-
-        // Use bit vector for small n, regular vector for large n
-        if (o.n <= 64) {
-            uint64_t seen_bits = 0;
-            for (IntT i = 0; i < o.n; ++i) {
-                const IntT pi = o.perm[static_cast<size_t>(i)];
-                if (pi < 0 || pi >= o.n) QDLDL23_UNLIKELY
-                throw InvalidMatrixError("Invalid permutation");
-                const uint64_t bit = uint64_t{1} << static_cast<uint64_t>(pi);
-                if (seen_bits & bit) QDLDL23_UNLIKELY
-                throw InvalidMatrixError("Invalid permutation");
-                seen_bits |= bit;
-                o.iperm[static_cast<size_t>(pi)] = i;
-            }
-        } else {
-            std::vector<bool> seen(static_cast<size_t>(o.n), false);
-            for (IntT i = 0; i < o.n; ++i) {
-                const IntT pi = o.perm[static_cast<size_t>(i)];
-                if (pi < 0 || pi >= o.n || seen[static_cast<size_t>(pi)])
-                    QDLDL23_UNLIKELY
-                throw InvalidMatrixError("Invalid permutation");
-                seen[static_cast<size_t>(pi)] = true;
-                o.iperm[static_cast<size_t>(pi)] = i;
-            }
-        }
-        return o;
-    }
-};
+// Shared with the other custom solvers (linear_system/common/ordering.h).
+// Note: from_perm throws std::invalid_argument on a bad permutation.
+using linsys::Ordering;
 
 // Enhanced symmetric permutation with better memory access patterns
 template <std::floating_point FloatT = double,

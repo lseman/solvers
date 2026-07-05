@@ -14,6 +14,13 @@ except ImportError:
     LDLTSolver = None
     solve_ldlt = None
 
+try:
+    from .ldlt_bk import BunchKaufmanFactors, BunchKaufmanLDLT, solve as solve_ldlt_bk
+except ImportError:
+    BunchKaufmanFactors = None
+    BunchKaufmanLDLT = None
+    solve_ldlt_bk = None
+
 __all__ = [
     "IPSolver",
     "IPMSolution",
@@ -21,4 +28,7 @@ __all__ = [
     "solve_ipm",
     "LDLTSolver",
     "solve_ldlt",
+    "BunchKaufmanFactors",
+    "BunchKaufmanLDLT",
+    "solve_ldlt_bk",
 ]
