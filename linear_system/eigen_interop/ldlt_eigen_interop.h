@@ -49,9 +49,10 @@ SparseCSC< Scalar, Index > fromEigenSparse(const Eigen::SparseMatrix< Scalar >& 
     Ai.reserve(trips.size());
     Ax.reserve(trips.size());
 
-    for (const auto& t : trips) {
-        if (!Ai.empty() && std::get< 0 >(t) == std::get< 0 >(trips.back()) &&
-            std::get< 1 >(t) == std::get< 1 >(trips.back())) {
+    for (size_t i = 0; i < trips.size(); i++) {
+        const auto& t = trips[i];
+        if (i > 0 && std::get< 0 >(t) == std::get< 0 >(trips[i - 1]) &&
+            std::get< 1 >(t) == std::get< 1 >(trips[i - 1])) {
             Ax.back() += std::get< 2 >(t);
         } else {
             Ai.push_back(std::get< 0 >(t));

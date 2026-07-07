@@ -24,6 +24,7 @@
 
 #include "../common/dense_matrix.h"
 #include "../common/sparse_csc.h"
+#include "../common/trisolve.h"
 
 namespace schur_frontal {
 
@@ -63,6 +64,9 @@ struct FrontalLDLT {
     std::vector< FrontalNode > fronts;
     std::vector< Int > elimination_order;
     std::vector< Real > diag;
+
+    std::vector< Int > perm;  // perm[old] = new
+    std::vector< Int > iperm; // iperm[new] = old
 
     SparseCSC< Real, Int > L;
 };
@@ -145,6 +149,46 @@ inline std::vector< std::pair< Int, Int > > singleton_supernodes(Int n) {
     for (Int j = 0; j < n; ++j)
         ranges.emplace_back(j, j);
     return ranges;
+}
+
+/// Solve A x = b using a factorized FrontalLDLT (P A P^T = L D L^T).
+inline std::vector< Real > solve(const FrontalLDLT& ldlt, const std::vector< Real >& b) {
+    Int n = ldlt.n;
+    if (static_cast< Int >(b.size()) != n)
+        throw std::invalid_argument("schur_frontal::solve: rhs size mismatch");
+
+    std::vector< Real > x(static_cast< size_t >(n));
+
+    // Permute: x[new] = b[iperm[new]] = b[old]
+    if (!ldlt.iperm.empty()) {
+        for (Int i = 0; i < n; ++i)
+            x[static_cast< size_t >(i)] =
+                b[static_cast< size_t >(ldlt.iperm[static_cast< size_t >(i)])];
+    } else {
+        x = b;
+    }
+
+    // Forward solve: L x = x (unit lower triangular, strict lower in CSC)
+    linsys::lsolve_unit(n, ldlt.L.Ap.data(), ldlt.L.Ai.data(), ldlt.L.Ax.data(), x.data());
+
+    // Diagonal solve: D^{-1} x
+    for (Int k = 0; k < n; ++k)
+        x[static_cast< size_t >(k)] /= ldlt.diag[static_cast< size_t >(k)];
+
+    // Backward solve: L^T x = x
+    linsys::ltsolve_unit(n, ldlt.L.Ap.data(), ldlt.L.Ai.data(), ldlt.L.Ax.data(), x.data());
+
+    // Un-permute: result[old] = x[perm[old]]
+    std::vector< Real > result(static_cast< size_t >(n));
+    if (!ldlt.perm.empty()) {
+        for (Int i = 0; i < n; ++i)
+            result[static_cast< size_t >(i)] =
+                x[static_cast< size_t >(ldlt.perm[static_cast< size_t >(i)])];
+    } else {
+        result = std::move(x);
+    }
+
+    return result;
 }
 
 } // namespace schur_frontal

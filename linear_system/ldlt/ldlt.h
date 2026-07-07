@@ -263,7 +263,7 @@ template < typename Scalar = double, typename Index = int32_t > class Simplicial
                     if (wi->row < li->first) {
                         merge_scratch.push_back(*wi++);
                     } else if (wi->row > li->first) {
-                        merge_scratch.emplace_back(li->first, li->second * alpha);
+                        merge_scratch.emplace_back(li->first, -li->second * alpha);
                         ++li;
                     } else {
                         wi->val -= li->second * alpha;
@@ -273,7 +273,7 @@ template < typename Scalar = double, typename Index = int32_t > class Simplicial
                 }
                 merge_scratch.insert(merge_scratch.end(), wi, w.end());
                 while (li != Lj.end()) {
-                    merge_scratch.emplace_back(li->first, li->second * alpha);
+                    merge_scratch.emplace_back(li->first, -li->second * alpha);
                     ++li;
                 }
                 w = std::move(merge_scratch);

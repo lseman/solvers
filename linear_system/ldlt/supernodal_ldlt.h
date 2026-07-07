@@ -367,7 +367,7 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
                     if (wi->row < li->row) {
                         merge_scratch.push_back(*wi++);
                     } else if (wi->row > li->row) {
-                        merge_scratch.emplace_back(li->row, li->val * alpha);
+                        merge_scratch.emplace_back(li->row, -li->val * alpha);
                         ++li;
                     } else {
                         wi->val -= li->val * alpha;
@@ -377,7 +377,7 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
                 }
                 merge_scratch.insert(merge_scratch.end(), wi, w.end());
                 while (li != Lj.end()) {
-                    merge_scratch.emplace_back(li->row, li->val * alpha);
+                    merge_scratch.emplace_back(li->row, -li->val * alpha);
                     ++li;
                 }
                 w = std::move(merge_scratch);

@@ -34,9 +34,9 @@ else()
 endif()
 
 # Module build options
-option(BUILD_OSPQ "Build OSQP solver extension" OFF)
-option(BUILD_PIQP "Build PIQP solver extension" OFF)
-option(BUILD_QDLDL "Build QDLDL extension" OFF)
+option(BUILD_OSPQ "Build OSQP solver extension" ON)
+option(BUILD_PIQP "Build PIQP solver extension" ON)
+option(BUILD_QDLDL "Build QDLDL extension" ON)
 option(BUILD_LDLT "Build custom LDLT extension" ON)
 option(BUILD_IPM "Build IPM solver extension" ON)
 option(BUILD_SOLVER_TESTS "Build solver C++ tests" OFF)
@@ -159,6 +159,17 @@ if(BUILD_IPM)
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     list(APPEND SOLVER_TARGETS ipm_ext)
+
+    # Quasi-definite augmented-system solver (BK pivoting + iterative refinement)
+    nanobind_add_module(ipm_qd python/ipm_qd_ext.cpp)
+    target_link_libraries(ipm_qd PRIVATE solvers_headers)
+    set_target_properties(
+        ipm_qd
+        PROPERTIES
+        OUTPUT_NAME ipm_qd
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    list(APPEND SOLVER_TARGETS ipm_qd)
 endif()
 
 if(SOLVER_TARGETS)
