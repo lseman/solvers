@@ -36,163 +36,256 @@
 namespace ldlt {
 
 // Cache prefetching
-inline void prefetch_read(const void *addr) {
+inline void prefetch_read(const void* addr) {
 #if defined(__SSE2__)
-  _mm_prefetch(static_cast<const char *>(addr), _MM_HINT_T0);
+    _mm_prefetch(static_cast< const char* >(addr), _MM_HINT_T0);
 #endif
 }
 
-inline void prefetch_write(const void *addr) {
+inline void prefetch_write(const void* addr) {
 #if defined(__SSE2__)
-  _mm_prefetch(static_cast<const char *>(addr), _MM_HINT_T0);
+    _mm_prefetch(static_cast< const char* >(addr), _MM_HINT_T0);
 #endif
 }
 
 // SIMD: scale array by vector (x[i] *= scale[i])
-inline void simd_scale_array(double *__restrict__ x,
-                             const double *__restrict__ scale, size_t n) {
-  size_t i = 0;
+inline void simd_scale_array(double* __restrict__ x, const double* __restrict__ scale, size_t n) {
+    size_t i = 0;
 
 #if LDLT_HAS_AVX512
-  const size_t simd_end = n - (n % 8);
-  for (; i < simd_end; i += 8) {
-    if ((i & 63) == 0) {
-      prefetch_read(&scale[i + 64]);
-      prefetch_write(&x[i + 64]);
+    const size_t simd_end = n - (n % 8);
+    for (; i < simd_end; i += 8) {
+        if ((i & 63) == 0) {
+            prefetch_read(&scale[i + 64]);
+            prefetch_write(&x[i + 64]);
+        }
+        __m512d vx = _mm512_loadu_pd(&x[i]);
+        __m512d vs = _mm512_loadu_pd(&scale[i]);
+        vx = _mm512_mul_pd(vx, vs);
+        _mm512_storeu_pd(&x[i], vx);
     }
-    __m512d vx = _mm512_loadu_pd(&x[i]);
-    __m512d vs = _mm512_loadu_pd(&scale[i]);
-    vx = _mm512_mul_pd(vx, vs);
-    _mm512_storeu_pd(&x[i], vx);
-  }
 #elif LDLT_HAS_AVX2
-  const size_t simd_end = n - (n % 4);
-  for (; i < simd_end; i += 4) {
-    if ((i & 31) == 0) {
-      prefetch_read(&scale[i + 32]);
-      prefetch_write(&x[i + 32]);
+    const size_t simd_end = n - (n % 4);
+    for (; i < simd_end; i += 4) {
+        if ((i & 31) == 0) {
+            prefetch_read(&scale[i + 32]);
+            prefetch_write(&x[i + 32]);
+        }
+        __m256d vx = _mm256_loadu_pd(&x[i]);
+        __m256d vs = _mm256_loadu_pd(&scale[i]);
+        vx = _mm256_mul_pd(vx, vs);
+        _mm256_storeu_pd(&x[i], vx);
     }
-    __m256d vx = _mm256_loadu_pd(&x[i]);
-    __m256d vs = _mm256_loadu_pd(&scale[i]);
-    vx = _mm256_mul_pd(vx, vs);
-    _mm256_storeu_pd(&x[i], vx);
-  }
 #elif LDLT_HAS_SSE2
-  const size_t simd_end = n - (n % 2);
-  for (; i < simd_end; i += 2) {
-    __m128d vx = _mm_loadu_pd(&x[i]);
-    __m128d vs = _mm_loadu_pd(&scale[i]);
-    vx = _mm_mul_pd(vx, vs);
-    _mm_storeu_pd(&x[i], vx);
-  }
+    const size_t simd_end = n - (n % 2);
+    for (; i < simd_end; i += 2) {
+        __m128d vx = _mm_loadu_pd(&x[i]);
+        __m128d vs = _mm_loadu_pd(&scale[i]);
+        vx = _mm_mul_pd(vx, vs);
+        _mm_storeu_pd(&x[i], vx);
+    }
 #endif
 
-  for (; i < n; ++i) x[i] *= scale[i];
+    for (; i < n; ++i)
+        x[i] *= scale[i];
 }
 
 // SIMD: sparse multiply-accumulate for factorization kernels
 // Computes: x[rows[i]] -= scale * vals[i] for contiguous i
 // Used in forward/backward solves for small dense segments
-inline void simd_sparse_macc(double *__restrict__ x,
-                             const int32_t *__restrict__ rows,
-                             const double *__restrict__ vals, size_t n,
-                             double scale) {
-#if LDLT_HAS_AVX2
-  const size_t prefetch_dist = 4;
-  for (size_t i = 0; i < n; ++i) {
-    if (i + prefetch_dist < n) {
-      const int32_t future_row = rows[i + prefetch_dist];
-      if (future_row >= 0) {
-        prefetch_write(&x[static_cast<size_t>(future_row)]);
-      }
+inline void simd_sparse_macc(double* __restrict__ x, const int32_t* __restrict__ rows,
+                             const double* __restrict__ vals, size_t n, double scale) {
+    if (n == 0)
+        return;
+
+#if LDLT_HAS_AVX512
+    // AVX-512: load vals in SIMD, broadcast scale, FMAD-sub to scattered x
+    const size_t simd_end = n - (n % 8);
+    const size_t prefetch_dist = 8;
+    __m512d vscale = _mm512_set1_pd(-scale);
+
+    for (size_t i = 0; i < simd_end; i += 8) {
+        // Prefetch future x targets
+        if (i + prefetch_dist < simd_end) {
+            for (int k = 0; k < 4; ++k) {
+                const int32_t r = rows[i + prefetch_dist + k];
+                if (r >= 0)
+                    prefetch_write(&x[static_cast< size_t >(r)]);
+            }
+        }
+
+        // Load 8 values (SIMD width for double)
+        __m512d vvals = _mm512_loadu_pd(&vals[i]);
+        __m512d vprod = _mm512_mul_pd(vvals, vscale); // -scale * vals[i..i+7]
+
+        // Store all 8 for scatter
+        double tmp8[8];
+        _mm512_storeu_pd(tmp8, vprod);
+        for (int lane = 0; lane < 8; ++lane) {
+            const int32_t row = rows[i + lane];
+            if (row >= 0) {
+                x[static_cast< size_t >(row)] += tmp8[lane];
+            }
+        }
     }
-    const int32_t j = rows[i];
-    if (j >= 0) {
-      x[static_cast<size_t>(j)] -= scale * vals[i];
+
+    // Scalar tail
+    for (size_t i = simd_end; i < n; ++i) {
+        const int32_t j = rows[i];
+        if (j >= 0) {
+            x[static_cast< size_t >(j)] -= scale * vals[i];
+        }
     }
-  }
+#elif LDLT_HAS_AVX2
+    // AVX2: load vals in SIMD, broadcast scale, FMAD-sub to scattered x
+    const size_t simd_end = n - (n % 4);
+    const size_t prefetch_dist = 4;
+    __m256d vscale = _mm256_set1_pd(-scale);
+
+    for (size_t i = 0; i < simd_end; i += 4) {
+        if (i + prefetch_dist < n) {
+            for (int k = 0; k < 2; ++k) {
+                const int32_t r = rows[i + prefetch_dist + k];
+                if (r >= 0)
+                    prefetch_write(&x[static_cast< size_t >(r)]);
+            }
+        }
+
+        __m256d vvals = _mm256_loadu_pd(&vals[i]);
+        __m256d vprod = _mm256_mul_pd(vvals, vscale);
+
+        // Unpack and scatter — AVX2 doesn't have masked scatter,
+        // so we extract and store individually (still wins via vectorized load+mul)
+        double tmp[4];
+        _mm256_storeu_pd(tmp, vprod);
+        for (int lane = 0; lane < 4; ++lane) {
+            const int32_t row = rows[i + lane];
+            if (row >= 0) {
+                x[static_cast< size_t >(row)] += tmp[lane];
+            }
+        }
+    }
+
+    // Scalar tail
+    for (size_t i = simd_end; i < n; ++i) {
+        const int32_t j = rows[i];
+        if (j >= 0) {
+            x[static_cast< size_t >(j)] -= scale * vals[i];
+        }
+    }
+#elif LDLT_HAS_SSE2
+    // SSE2: load 2 values at a time
+    const size_t simd_end = n - (n % 2);
+    __m128d vscale = _mm_set1_pd(-scale);
+
+    for (size_t i = 0; i < simd_end; i += 2) {
+        __m128d vvals = _mm_loadu_pd(&vals[i]);
+        __m128d vprod = _mm_mul_pd(vvals, vscale);
+
+        double tmp[2];
+        _mm_storeu_pd(tmp, vprod);
+        for (int lane = 0; lane < 2; ++lane) {
+            const int32_t row = rows[i + lane];
+            if (row >= 0) {
+                x[static_cast< size_t >(row)] += tmp[lane];
+            }
+        }
+    }
+
+    // Scalar tail
+    for (size_t i = simd_end; i < n; ++i) {
+        const int32_t j = rows[i];
+        if (j >= 0) {
+            x[static_cast< size_t >(j)] -= scale * vals[i];
+        }
+    }
 #else
-  for (size_t i = 0; i < n; ++i) {
-    const int32_t j = rows[i];
-    if (j >= 0) {
-      x[static_cast<size_t>(j)] -= scale * vals[i];
+    // Pure scalar fallback
+    for (size_t i = 0; i < n; ++i) {
+        const int32_t j = rows[i];
+        if (j >= 0) {
+            x[static_cast< size_t >(j)] -= scale * vals[i];
+        }
     }
-  }
 #endif
 }
 
 // SIMD: dense segment accumulation (contiguous scatter for column ops)
 // Computes: x[k:k+n] -= alpha * y[p0:p1] where access is sequential
 // Useful for dense frontal blocks in supernodal factorization
-inline void simd_dense_axpy(double *__restrict__ x, double alpha,
-                            const double *__restrict__ y, size_t n) {
-  size_t i = 0;
+inline void simd_dense_axpy(double* __restrict__ x, double alpha, const double* __restrict__ y,
+                            size_t n) {
+    size_t i = 0;
 
 #if LDLT_HAS_AVX512
-  const size_t simd_end = n - (n % 8);
-  __m512d valpha = _mm512_set1_pd(-alpha);
-  for (; i < simd_end; i += 8) {
-    __m512d vy = _mm512_loadu_pd(&y[i]);
-    __m512d vx = _mm512_loadu_pd(&x[i]);
-    vx = _mm512_fmadd_pd(valpha, vy, vx);
-    _mm512_storeu_pd(&x[i], vx);
-  }
+    const size_t simd_end = n - (n % 8);
+    __m512d valpha = _mm512_set1_pd(-alpha);
+    for (; i < simd_end; i += 8) {
+        __m512d vy = _mm512_loadu_pd(&y[i]);
+        __m512d vx = _mm512_loadu_pd(&x[i]);
+        vx = _mm512_fmadd_pd(valpha, vy, vx);
+        _mm512_storeu_pd(&x[i], vx);
+    }
 #elif LDLT_HAS_AVX2
-  const size_t simd_end = n - (n % 4);
-  __m256d valpha = _mm256_set1_pd(-alpha);
-  for (; i < simd_end; i += 4) {
-    __m256d vy = _mm256_loadu_pd(&y[i]);
-    __m256d vx = _mm256_loadu_pd(&x[i]);
-    vx = _mm256_fmadd_pd(valpha, vy, vx);
-    _mm256_storeu_pd(&x[i], vx);
-  }
+    const size_t simd_end = n - (n % 4);
+    __m256d valpha = _mm256_set1_pd(-alpha);
+    for (; i < simd_end; i += 4) {
+        __m256d vy = _mm256_loadu_pd(&y[i]);
+        __m256d vx = _mm256_loadu_pd(&x[i]);
+        vx = _mm256_fmadd_pd(valpha, vy, vx);
+        _mm256_storeu_pd(&x[i], vx);
+    }
 #elif LDLT_HAS_SSE2
-  const size_t simd_end = n - (n % 2);
-  for (; i < simd_end; i += 2) {
-    __m128d vy = _mm_loadu_pd(&y[i]);
-    __m128d vx = _mm_loadu_pd(&x[i]);
-    __m128d vprod = _mm_mul_pd(vy, _mm_set1_pd(-alpha));
-    vx = _mm_add_pd(vx, vprod);
-    _mm_storeu_pd(&x[i], vx);
-  }
+    const size_t simd_end = n - (n % 2);
+    for (; i < simd_end; i += 2) {
+        __m128d vy = _mm_loadu_pd(&y[i]);
+        __m128d vx = _mm_loadu_pd(&x[i]);
+        __m128d vprod = _mm_mul_pd(vy, _mm_set1_pd(-alpha));
+        vx = _mm_add_pd(vx, vprod);
+        _mm_storeu_pd(&x[i], vx);
+    }
 #endif
 
-  for (; i < n; ++i) x[i] -= alpha * y[i];
+    for (; i < n; ++i)
+        x[i] -= alpha * y[i];
 }
 
 // Parallel for loop: divides n iterations across hardware threads
 // Automatically serializes if n is small or only 1 thread available
-template <class F> inline void par_for_n(std::size_t n, F &&f) {
-  constexpr std::size_t min_parallel_size = 1000;
+template < class F > inline void par_for_n(std::size_t n, F&& f) {
+    constexpr std::size_t min_parallel_size = 1000;
 
-  if (n < min_parallel_size) {
-    for (std::size_t i = 0; i < n; ++i) f(i);
-    return;
-  }
-
-  const auto num_threads = std::max(1u, std::thread::hardware_concurrency());
-  const auto chunk_size = (n + num_threads - 1) / num_threads;
-
-  if (num_threads > 1 && n > 2 * min_parallel_size) {
-    std::vector<std::thread> threads;
-    threads.reserve(num_threads);
-
-    for (unsigned t = 0; t < num_threads; ++t) {
-      threads.emplace_back([=]() {
-        const auto start = static_cast<std::size_t>(t) * chunk_size;
-        const auto end = std::min(start + chunk_size, n);
-        for (std::size_t i = start; i < end; ++i) {
-          f(i);
-        }
-      });
+    if (n < min_parallel_size) {
+        for (std::size_t i = 0; i < n; ++i)
+            f(i);
+        return;
     }
 
-    for (auto &thread : threads) thread.join();
-  } else {
-    for (std::size_t i = 0; i < n; ++i) f(i);
-  }
+    const auto num_threads = std::max(1u, std::thread::hardware_concurrency());
+    const auto chunk_size = (n + num_threads - 1) / num_threads;
+
+    if (num_threads > 1 && n > 2 * min_parallel_size) {
+        std::vector< std::thread > threads;
+        threads.reserve(num_threads);
+
+        for (unsigned t = 0; t < num_threads; ++t) {
+            threads.emplace_back([=]() {
+                const auto start = static_cast< std::size_t >(t) * chunk_size;
+                const auto end = std::min(start + chunk_size, n);
+                for (std::size_t i = start; i < end; ++i) {
+                    f(i);
+                }
+            });
+        }
+
+        for (auto& thread : threads)
+            thread.join();
+    } else {
+        for (std::size_t i = 0; i < n; ++i)
+            f(i);
+    }
 }
 
-}  // namespace ldlt
+} // namespace ldlt
 
-#endif  // LDLT_SIMD_H
+#endif // LDLT_SIMD_H
