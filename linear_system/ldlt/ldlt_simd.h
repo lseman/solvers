@@ -252,6 +252,137 @@ inline void simd_dense_axpy(double* __restrict__ x, double alpha, const double* 
 
 // Parallel for loop: divides n iterations across hardware threads
 // Automatically serializes if n is small or only 1 thread available
+// ── SIMD: strided dot product ──────────────────────────────────────────────
+// Computes dot(a[0], a[stride], a[2*stride], ...) · dot(b[0], b[stride], ...)
+inline double simd_strided_dot(const double* __restrict__ a, const double* __restrict__ b, size_t n,
+                               size_t stride) {
+    double sum = 0.0;
+#if LDLT_HAS_AVX512
+    const size_t simd_end = n - (n % 8);
+    const __m512i idx512 = _mm512_set_epi32(7, 6, 5, 4, 3, 2, 1, 0, 7, 6, 5, 4, 3, 2, 1, 0);
+    for (size_t i = 0; i < simd_end; i += 8) {
+        __m512d va = _mm512_i32gather_pd(&a[i * stride], idx512, 8);
+        __m512d vb = _mm512_i32gather_pd(&b[i * stride], idx512, 8);
+        __m512d vmul = _mm512_mul_pd(va, vb);
+        sum += _mm_cvtsd_f64(_mm512_extractf64x2_pd(vmul, 0));
+        sum += _mm_cvtsd_f64(_mm512_extractf64x2_pd(vmul, 1));
+    }
+#elif LDLT_HAS_AVX2
+    const size_t simd_end = n - (n % 4);
+    const __m128i idx256 = _mm_set_epi32(3, 2, 1, 0);
+    for (size_t i = 0; i < simd_end; i += 4) {
+        __m256d va = _mm256_i32gather_pd(&a[i * stride], idx256, 8);
+        __m256d vb = _mm256_i32gather_pd(&b[i * stride], idx256, 8);
+        __m256d vmul = _mm256_mul_pd(va, vb);
+        sum += _mm_cvtsd_f64(_mm256_extractf128_pd(vmul, 0));
+        sum += _mm_cvtsd_f64(_mm256_extractf128_pd(vmul, 1));
+    }
+#elif LDLT_HAS_SSE2
+    const size_t simd_end = n - (n % 2);
+    for (size_t i = 0; i < simd_end; i += 2) {
+        double va0 = a[i * stride], va1 = a[(i + 1) * stride];
+        double vb0 = b[i * stride], vb1 = b[(i + 1) * stride];
+        __m128d va = _mm_set_pd(va1, va0);
+        __m128d vb = _mm_set_pd(vb1, vb0);
+        __m128d vmul = _mm_mul_pd(va, vb);
+        sum += _mm_cvtsd_f64(vmul);
+        __m128d vshuf = _mm_shuffle_pd(vmul, vmul, 1);
+        sum += _mm_cvtsd_f64(vshuf);
+    }
+#endif
+
+    for (size_t i = simd_end; i < n; ++i)
+        sum += a[i * stride] * b[i * stride];
+    return sum;
+}
+
+// ── SIMD: strided column mirror (row → column) ─────────────────────────────
+inline void simd_strided_col_mirror(const double* __restrict__ row_src,
+                                    double* __restrict__ col_dst, size_t start, size_t len,
+                                    size_t stride) {
+    const double* __restrict__ src = &row_src[start * stride];
+    for (size_t i = 0; i < len; ++i)
+        col_dst[(start + i) * stride] = src[i];
+}
+
+// ── SIMD: masked scatter ───────────────────────────────────────────────────
+inline void simd_scatter_masked(double* __restrict__ out, const double* __restrict__ src,
+                                const int32_t* __restrict__ indices, size_t n) {
+    if (n == 0)
+        return;
+#if LDLT_HAS_AVX512
+    const size_t simd_end = n - (n % 8);
+    for (size_t i = 0; i < simd_end; i += 8) {
+        __m512d vsrc = _mm512_loadu_pd(&src[i]);
+        __m512i vidx = _mm512_loadu_epi32(&indices[i]);
+        __m512i cmp = _mm512_cmpgt_epi32(vidx, _mm512_setzero_si512());
+        unsigned mask = _mm512_movemask_ps(_mm512_castsi512_ps(cmp));
+        _mm512_mask_i32scatter_pd(out, static_cast< unsigned char >(mask & 0xFF), &indices[i], vsrc,
+                                  8);
+    }
+#elif LDLT_HAS_AVX2
+    const size_t simd_end = n - (n % 4);
+    for (size_t i = 0; i < simd_end; i += 4) {
+        __m256d vsrc = _mm256_loadu_pd(&src[i]);
+        double vals[4];
+        _mm256_storeu_pd(vals, vsrc);
+        for (int k = 0; k < 4; ++k) {
+            const int32_t idx = indices[i + k];
+            if (idx >= 0)
+                out[static_cast< size_t >(idx)] = vals[k];
+        }
+    }
+#elif LDLT_HAS_SSE2
+    const size_t simd_end = n - (n % 2);
+    for (size_t i = 0; i < simd_end; i += 2) {
+        const int32_t i0 = indices[i];
+        const int32_t i1 = indices[i + 1];
+        if (i0 >= 0)
+            out[static_cast< size_t >(i0)] = src[i];
+        if (i1 >= 0)
+            out[static_cast< size_t >(i1)] = src[i + 1];
+    }
+#endif
+
+    for (size_t i = simd_end; i < n; ++i) {
+        const int32_t idx = indices[i];
+        if (idx >= 0)
+            out[static_cast< size_t >(idx)] = src[i];
+    }
+}
+
+// ── SIMD: gather permutation ───────────────────────────────────────────────
+inline void simd_gather_permute(const double* __restrict__ src, const int32_t* __restrict__ indices,
+                                double* __restrict__ out, size_t n) {
+    if (n == 0)
+        return;
+#if LDLT_HAS_AVX512
+    const size_t simd_end = n - (n % 8);
+    const __m512i idx = _mm512_set_epi32(7, 6, 5, 4, 3, 2, 1, 0, 7, 6, 5, 4, 3, 2, 1, 0);
+    for (size_t i = 0; i < simd_end; i += 8) {
+        __m512i vperm = _mm512_loadu_epi32(&indices[i]);
+        __m512d vgather = _mm512_i32gather_pd(src, vperm, 8);
+        _mm512_storeu_pd(&out[i], vgather);
+    }
+#elif LDLT_HAS_AVX2
+    const size_t simd_end = n - (n % 4);
+    const __m128i idx4 = _mm_set_epi32(3, 2, 1, 0);
+    for (size_t i = 0; i < simd_end; i += 4) {
+        __m256d vgather = _mm256_i32gather_pd(src, idx4, 8);
+        _mm256_storeu_pd(&out[i], vgather);
+    }
+#elif LDLT_HAS_SSE2
+    const size_t simd_end = n - (n % 2);
+    for (size_t i = 0; i < simd_end; i += 2) {
+        out[i] = src[static_cast< size_t >(indices[i])];
+        out[i + 1] = src[static_cast< size_t >(indices[i + 1])];
+    }
+#endif
+
+    for (size_t i = simd_end; i < n; ++i)
+        out[i] = src[static_cast< size_t >(indices[i])];
+}
+
 template < class F > inline void par_for_n(std::size_t n, F&& f) {
     constexpr std::size_t min_parallel_size = 1000;
 

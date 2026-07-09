@@ -15,14 +15,8 @@ endif()
 if(MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /O2 /arch:AVX2 /fp:fast")
 else()
-    # GCC/Clang: AVX2 (most portable SIMD), with LTO
-    include(CheckCXXCompilerFlag)
-    check_cxx_compiler_flag("-mavx2 -mfma" HAS_AVX2)
-    if(HAS_AVX2)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mavx2 -mfma")
-    else()
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -msse2")
-    endif()
+    # GCC/Clang: haswell baseline (covers AVX2/FMA/AVX512 on modern CPUs)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=haswell")
 
     # Optimization: -O3, LTO
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3")
@@ -31,6 +25,13 @@ else()
 
     # LTO for smaller, faster binaries
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION ON)
+endif()
+
+# ── Highway SIMD (optional, runtime ISA dispatch) ──────────────────────────
+option(WITH_HIGHWAY "Enable Google Highway for runtime SIMD dispatch (AVX512/AVX2/SSE2/NEON)" OFF)
+if(WITH_HIGHWAY)
+    message(STATUS "Highway SIMD enabled — runtime ISA dispatch")
+    set(LDTLT_WITH_HIGHWAY ON)
 endif()
 
 # Module build options
@@ -75,6 +76,23 @@ CPMAddPackage(
     GIT_TAG v2.9.2
 )
 
+# Highway: portable SIMD with runtime ISA dispatch
+if(WITH_HIGHWAY)
+    CPMAddPackage(
+        NAME highway
+        GIT_REPOSITORY https://github.com/google/highway.git
+        GIT_TAG v1.2.0
+        OPTIONS
+            "HWY_ENABLE_TESTS OFF"
+            "HWY_ENABLE_EXAMPLES OFF"
+            "HWY_ENABLE_CONTRIB OFF"
+            "HWY_ENABLE_INSTALL OFF"
+    )
+    if(highway_ADDED)
+        message(STATUS "Highway fetched via CPM")
+    endif()
+endif()
+
 find_package(Python 3.8 REQUIRED COMPONENTS Interpreter Development.Module)
 
 add_library(solvers_headers INTERFACE)
@@ -113,6 +131,11 @@ endif()
 if(BUILD_QDLDL)
     nanobind_add_module(qdldl_ext python/qdldl_ext.cpp)
     target_link_libraries(qdldl_ext PRIVATE solvers_headers)
+    if(WITH_HIGHWAY)
+        target_compile_definitions(qdldl_ext PRIVATE LDLT_WITH_HIGHWAY)
+        target_include_directories(qdldl_ext PRIVATE ${highway_SOURCE_DIR}/src)
+        target_link_libraries(qdldl_ext PRIVATE highway::highway)
+    endif()
     set_target_properties(
         qdldl_ext
         PROPERTIES
@@ -125,6 +148,11 @@ endif()
 if(BUILD_LDLT)
     nanobind_add_module(ldlt_ext python/ldlt_ext.cpp)
     target_link_libraries(ldlt_ext PRIVATE solvers_headers)
+    if(WITH_HIGHWAY)
+        target_compile_definitions(ldlt_ext PRIVATE LDLT_WITH_HIGHWAY)
+        target_include_directories(ldlt_ext PRIVATE ${highway_SOURCE_DIR}/src)
+        target_link_libraries(ldlt_ext PRIVATE highway::highway)
+    endif()
     set_target_properties(
         ldlt_ext
         PROPERTIES
@@ -135,6 +163,11 @@ if(BUILD_LDLT)
 
     nanobind_add_module(ldlt_bk_ext python/ldlt_bk_ext.cpp)
     target_link_libraries(ldlt_bk_ext PRIVATE solvers_headers)
+    if(WITH_HIGHWAY)
+        target_compile_definitions(ldlt_bk_ext PRIVATE LDLT_WITH_HIGHWAY)
+        target_include_directories(ldlt_bk_ext PRIVATE ${highway_SOURCE_DIR}/src)
+        target_link_libraries(ldlt_bk_ext PRIVATE highway::highway)
+    endif()
     set_target_properties(
         ldlt_bk_ext
         PROPERTIES
@@ -163,6 +196,11 @@ if(BUILD_IPM)
     # Quasi-definite augmented-system solver (BK pivoting + iterative refinement)
     nanobind_add_module(ipm_qd python/ipm_qd_ext.cpp)
     target_link_libraries(ipm_qd PRIVATE solvers_headers)
+    if(WITH_HIGHWAY)
+        target_compile_definitions(ipm_qd PRIVATE LDLT_WITH_HIGHWAY)
+        target_include_directories(ipm_qd PRIVATE ${highway_SOURCE_DIR}/src)
+        target_link_libraries(ipm_qd PRIVATE highway::highway)
+    endif()
     set_target_properties(
         ipm_qd
         PROPERTIES

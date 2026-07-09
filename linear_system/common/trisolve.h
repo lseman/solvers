@@ -143,18 +143,32 @@ inline void ltsolve_unit(Index n, const Index* Lp, const Index* Li, const Scalar
     }
 }
 
-/// Gather: out[i] = in[map[i]].
+/// Gather: out[i] = in[map[i]]. AVX-512/AVX2 gather path for double/int32_t.
 template < typename Scalar, typename Index >
 inline void permute_gather(Index n, const Index* map, const Scalar* in, Scalar* out) {
-    for (Index i = 0; i < n; ++i)
-        out[static_cast< size_t >(i)] = in[static_cast< size_t >(map[static_cast< size_t >(i)])];
+    if constexpr (std::is_same_v< Scalar, double > && std::is_same_v< Index, int32_t > &&
+                  LDLT_HAS_AVX512) {
+        ldlt::simd_gather_permute(in, reinterpret_cast< const int32_t* >(map), out,
+                                  static_cast< size_t >(n));
+    } else {
+        for (Index i = 0; i < n; ++i)
+            out[static_cast< size_t >(i)] =
+                in[static_cast< size_t >(map[static_cast< size_t >(i)])];
+    }
 }
 
-/// Scatter: out[map[i]] = in[i].
+/// Scatter: out[map[i]] = in[i]. AVX-512 masked scatter path for double/int32_t.
 template < typename Scalar, typename Index >
 inline void permute_scatter(Index n, const Index* map, const Scalar* in, Scalar* out) {
-    for (Index i = 0; i < n; ++i)
-        out[static_cast< size_t >(map[static_cast< size_t >(i)])] = in[static_cast< size_t >(i)];
+    if constexpr (std::is_same_v< Scalar, double > && std::is_same_v< Index, int32_t > &&
+                  LDLT_HAS_AVX512) {
+        ldlt::simd_scatter_masked(out, in, reinterpret_cast< const int32_t* >(map),
+                                  static_cast< size_t >(n));
+    } else {
+        for (Index i = 0; i < n; ++i)
+            out[static_cast< size_t >(map[static_cast< size_t >(i)])] =
+                in[static_cast< size_t >(i)];
+    }
 }
 
 } // namespace linsys

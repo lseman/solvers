@@ -334,8 +334,7 @@ inline std::vector< Real > BunchKaufmanLDLT::solveImpl(const std::vector< Real >
 
     // Forward substitution: L y = P b  (plain column sweep; L is unit lower
     // and 2x2 blocks contribute no entry at (k+1,k), so blocks need no special case)
-    linsys::lsolve_unit(n, m_factors.Lp.data(), m_factors.Li.data(), m_factors.Lx.data(),
-                        x.data());
+    linsys::lsolve_unit(n, m_factors.Lp.data(), m_factors.Li.data(), m_factors.Lx.data(), x.data());
 
     // Block-diagonal solve: D z = y
     Int ptr = 0;
