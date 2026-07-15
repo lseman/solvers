@@ -1,3 +1,5 @@
+#pragma once
+
 /// qdldl.h — Header-only LDLᵀ factorization (QDLDL-style) for sparse upper CSC
 ///
 /// Modern C++20/23 implementation of the QDLDL algorithm for symmetric
