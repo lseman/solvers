@@ -1,13 +1,31 @@
-# Solvers
+# <img src="assets/optblocks-logo.svg" alt="optBlocks Logo" width="400"/>
+
+## optBlocks
 
 High-performance sparse matrix solvers and optimization algorithms.
 
 ## Overview
 
-This project provides header-only C++20/23 implementations of modern sparse solvers and QP algorithms:
+**optBlocks** provides high-performance C++20/23 implementations of modern sparse solvers and conic optimization algorithms:
 
-- **Linear Systems**: LDLᵀ factorization (QDLDL-style), AMD reordering, supernode identification
-- **Quadratic Programming**: OSQP (first-order ADMM-based QP) and PIQP (interior-point QP)
+### Available Solvers
+
+- **Linear Systems**:
+  - `qdldl_ext`: QDLDL-style LDLᵀ factorization for symmetric indefinite systems
+  - `ldlt_ext`: Custom simplicial LDLᵀ factorization
+  - `ldlt_bk_ext`: LDLᵀ with Bunch-Kaufman pivoting + iterative refinement
+  - `amd.h`: Approximate Minimum Degree reordering
+  - `supernodes.h`: Supernode identification from symbolic analysis
+
+- **Quadratic Programming**:
+  - `osqp_ext`: OSQP solver (first-order ADMM-based QP)
+  - `piqp_ext`: PIQP solver (interior-point primal-dual QP)
+
+- **Conic Optimization**:
+  - `ipm_ext`: HSDE (Homogeneous Self-Dual Embedding) interior-point method
+    - Supports LP, QP, SOCP, and SDP cones
+    - Exponential and power cone projections
+    - Infeasibility detection via homogeneous embedding
 
 All implementations emphasize numerical stability, cache-friendly memory layout, and SIMD optimizations.
 
@@ -48,19 +66,27 @@ All implementations emphasize numerical stability, cache-friendly memory layout,
 
 ## Quick Start
 
-### Linking
+### Python Bindings
 
-Header-only; include directly:
+Build with CMake and install via pip:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+make -C build
+pip install build/*.whl
+```
+
+### C++ Header-Only
+
+Include directly for linear system solvers:
 
 ```cpp
 #include "qdldl.h"
 #include "supernodes.h"
 #include "amd.h"
-#include "osqp.h"
-#include "piqp.h"
 ```
 
-Requires: C++20 or later, Eigen 3.4+ (for QP solvers)
+Requires: C++20 or later, Eigen 3.4+
 
 ### Example: LDLᵀ Factorization
 
@@ -106,6 +132,24 @@ auto result = solver.solve(P, q, A, l, u);
 
 if (result.status == "solved") {
     std::cout << "Objective: " << result.obj_val << "\n";
+}
+```
+
+### Example: Conic Optimization via IPM
+
+```cpp
+#include "ipm/IPSolver.h"
+
+// Initialize solver with problem data
+IPSolver solver;
+solver.initialize(A, P, q, b, cones);
+
+// Solve
+if (solver.solve()) {
+    auto x = solver.get_x();
+    auto y = solver.get_y();
+    auto obj = solver.get_objective_value();
+    std::cout << "Optimal objective: " << obj << "\n";
 }
 ```
 

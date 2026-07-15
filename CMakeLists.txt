@@ -40,6 +40,8 @@ option(BUILD_PIQP "Build PIQP solver extension" ON)
 option(BUILD_QDLDL "Build QDLDL extension" ON)
 option(BUILD_LDLT "Build custom LDLT extension" ON)
 option(BUILD_IPM "Build IPM solver extension" ON)
+option(BUILD_PDLP "Build PDLP first-order LP solver extension" ON)
+option(WITH_CUDA "Enable CUDA backend for PDLP" OFF)
 option(BUILD_SOLVER_TESTS "Build solver C++ tests" OFF)
 
 include(FetchContent)
@@ -208,6 +210,36 @@ if(BUILD_IPM)
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     list(APPEND SOLVER_TARGETS ipm_qd)
+endif()
+
+if(BUILD_PDLP)
+    nanobind_add_module(pdlp_ext python/pdlp_ext.cpp)
+    target_link_libraries(pdlp_ext PRIVATE solvers_headers)
+    if(WITH_CUDA)
+        enable_language(CUDA)
+        if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+            set(CMAKE_CUDA_ARCHITECTURES native)
+        endif()
+        find_package(CUDAToolkit REQUIRED)
+        target_sources(pdlp_ext PRIVATE src/pdlp/pdlp_cuda.cu)
+        target_compile_definitions(pdlp_ext PRIVATE PDLP_WITH_CUDA)
+        # host code in .cu must use the same arch as the C++ TUs — Eigen's
+        # allocator alignment is decided per-TU and mixing is an ODR violation
+        if(NOT MSVC)
+            target_compile_options(pdlp_ext PRIVATE
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-march=haswell>)
+        endif()
+        target_link_libraries(pdlp_ext PRIVATE CUDA::cudart CUDA::cusparse CUDA::cublas)
+        # nvcc device link steps don't mix with host LTO
+        set_target_properties(pdlp_ext PROPERTIES INTERPROCEDURAL_OPTIMIZATION OFF)
+    endif()
+    set_target_properties(
+        pdlp_ext
+        PROPERTIES
+        OUTPUT_NAME pdlp
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    list(APPEND SOLVER_TARGETS pdlp_ext)
 endif()
 
 if(SOLVER_TARGETS)
