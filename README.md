@@ -14,6 +14,7 @@ High-performance sparse matrix solvers and optimization algorithms.
   - `qdldl_ext`: QDLDL-style LDLᵀ factorization for symmetric indefinite systems
   - `ldlt_ext`: Custom simplicial LDLᵀ factorization
   - `ldlt_bk_ext`: LDLᵀ with Bunch-Kaufman pivoting + iterative refinement
+  - `klu_ext`: KLU-style sparse LU factorization for circuit simulation matrices
   - `amd.h`: Approximate Minimum Degree reordering
   - `supernodes.h`: Supernode identification from symbolic analysis
 
@@ -38,6 +39,12 @@ All implementations emphasize numerical stability, cache-friendly memory layout,
   - SIMD-accelerated solves (AVX-512, AVX2, SSE2)
   - Permutation support via orderings (e.g., AMD)
   - Iterative refinement for improved accuracy
+  
+- **klu.h**: KLU-style sparse LU factorization for circuit simulation matrices
+  - Block Triangular Form (BTF) decomposition for SPICE-like matrices
+  - AMD ordering within each diagonal block
+  - Sparse LU factorization with partial pivoting
+  - Designed for unsymmetric and structurally indefinite systems
   
 - **amd.h**: Approximate Minimum Degree reordering
   - Array-based implementation with SoTA micro-architecture tweaks
@@ -88,6 +95,22 @@ Include directly for linear system solvers:
 
 Requires: C++20 or later, Eigen 3.4+
 
+### Example: KLU Sparse LU Factorization
+
+```cpp
+#include "linear_system/klu/klu.h"
+
+klu::SparseCSC<int> csc;
+csc.n = n; csc.Ap = std::move(Ap); csc.Ai = std::move(Ai); csc.Ax = std::move(Ax);
+
+klu::Solver solver;
+auto sym = solver.analyze(csc);
+auto num = solver.factorize(csc, sym);
+
+// Solve Ax = b
+std::vector<double> x = solver.solve(num, b);
+```
+
 ### Example: LDLᵀ Factorization
 
 ```cpp
@@ -127,7 +150,7 @@ std::cout << "Bandwidth reduction: " << stats.bandwidth_reduction << "\n";
 #include "osqp.h"
 using namespace sosqp;
 
-SparseOSQPSolver solver(Settings{});
+sparse_osqp_solver solver(Settings{});
 auto result = solver.solve(P, q, A, l, u);
 
 if (result.status == "solved") {
@@ -138,10 +161,10 @@ if (result.status == "solved") {
 ### Example: Conic Optimization via IPM
 
 ```cpp
-#include "ipm/IPSolver.h"
+#include "ipm/ip_solver.h"
 
 // Initialize solver with problem data
-IPSolver solver;
+ip_solver solver;
 solver.initialize(A, P, q, b, cones);
 
 // Solve
@@ -168,6 +191,7 @@ MIT / Apache-2.0 (dual-licensed)
 ## References
 
 - QDLDL: [github.com/oxfordcontrol/qdldl](https://github.com/oxfordcontrol/qdldl)
+- KLU: Davis, T. A. et al. "Algorithm 832: KLU, a direct sparse solver for circuit simulation matrices."
 - AMD: Davis, T. A. (2004). Algorithm 8xx: AMD, an approximate minimum degree ordering algorithm.
 - OSQP: Stellato et al. (2020). OSQP: An Operator Splitting Solver for Quadratic Programs.
 - PIQP: [github.com/PREDICT-EPFL/piqp](https://github.com/PREDICT-EPFL/piqp)

@@ -463,9 +463,9 @@ inline Residuals compute_residuals(const SpMat& P, const SpMat& A, const Vec& x,
 
 /// Main sparse OSQP solver via ADMM.
 /// Handles general linear inequality constraints with optional scaling.
-class SparseOSQPSolver {
+class sparse_osqp_solver {
    public:
-    explicit SparseOSQPSolver(Settings s = Settings{}) : cfg_(s) {
+    explicit sparse_osqp_solver(Settings s = Settings{}) : cfg_(s) {
         // back-compat: if user set Settings.rho (deprecated), propagate to rho0
         cfg_.rho0 = cfg_.rho;
     }
@@ -630,47 +630,57 @@ class SparseOSQPSolver {
         constexpr Scalar kRhoFloor = 1e-30;
 
         for (int k = 0; k < cfg.max_iter; ++k) {
-            // ===== x-update (either NEFast or KKT)
-            Vec x_new;
+            // ===== OSQP ADMM steps: compute x_tilde_rhs and z_tilde_rhs
+            Vec x_tilde_rhs = cfg.sigma * xbar - q_use;
+            Vec rho_inv = rho.cwiseInverse();
+            Vec z_tilde_rhs = (m > 0 ? (zbar - rho_inv.cwiseProduct(ybar)) : Vec::Zero(0));
+
+            // ===== Solve KKT or NE for [x_tilde; z_tilde]
+            Vec x_tilde, z_tilde;
             if (use_kkt) {
-                Vec rhs1 = -q_use + cfg.sigma * xbar;
-                if (m > 0)
-                    rhs1 += A_use.transpose() * (rho.cwiseProduct(zbar) - ybar);
-                Vec rhs2 = (m > 0 ? zbar : Vec());
-                x_new =
-                    KKT.solve(rhs1, rhs2).first;  // keep ADMM y-update below
+                auto xz_tilde = KKT.solve(x_tilde_rhs, z_tilde_rhs);
+                x_tilde = xz_tilde.first;
+                z_tilde = xz_tilde.second;
             } else {
-                Vec rhs = -q_use + cfg.sigma * xbar;
+                Vec rhs = cfg.sigma * xbar - q_use;
                 if (m > 0)
                     rhs += A_use.transpose() * (rho.cwiseProduct(zbar) - ybar);
-                x_new = NEF.solve(rhs);
+                x_tilde = NEF.solve(rhs);
                 // Iterative refinement (1 step) if residual is large
-                Vec r_lin = rhs - NEF.M * x_new;
+                Vec r_lin = rhs - NEF.M * x_tilde;
                 if (r_lin.lpNorm<Eigen::Infinity>() > 1e-10 * rhs.lpNorm<Eigen::Infinity>()) {
                     Vec dx_corr = NEF.solve(r_lin);
-                    x_new += dx_corr;
+                    x_tilde += dx_corr;
                 }
+                // Compute z_tilde from x_tilde using the second KKT row:
+                // A x_tilde - diag(rho)^-1 z_tilde = z_tilde_rhs  =>  z_tilde = rho * (A x_tilde - z_tilde_rhs)
+                Vec Ax_tilde = (m > 0 ? A_use * x_tilde : Vec::Zero(m));
+                z_tilde = (m > 0 ? rho.cwiseProduct(Ax_tilde - z_tilde_rhs) : Vec::Zero(0));
             }
 
-            // ===== Over-relaxation and (z,y) updates (scaled)
-            Vec zt = (m > 0 ? A_use * x_new : Vec());  // Ā x̄^{k+1}
-            Vec x_hat = cfg.alpha * x_new + (1.0 - cfg.alpha) * xbar;
+            // ===== Over-relaxation and (z,y) updates (scaled) - standard OSQP ADMM steps
+            // Update x: x = alpha * x_tilde + (1 - alpha) * x_prev
+            xbar = cfg.alpha * x_tilde + (1.0 - cfg.alpha) * xbar;
 
-            Vec v;  // for z update
+            // Update z: z = alpha * z_tilde + (1 - alpha) * z_prev + rho_inv * y, then project onto [l, u]
+            Vec z_new;
             if (m > 0) {
-                v = cfg.alpha * zt + (1.0 - cfg.alpha) * zbar +
-                    ybar.cwiseQuotient(rho.cwiseMax(kRhoFloor));
+                z_new = cfg.alpha * z_tilde + (1.0 - cfg.alpha) * zbar + rho_inv.cwiseProduct(ybar);
+                z_new = project_box(z_new, l_use, u_use);
+            } else {
+                z_new = Vec::Zero(0);
             }
 
-            Vec z_new = (m > 0 ? project_box(v, l_use, u_use) : Vec());
-            Vec y_new =
-                (m > 0
-                     ? ybar + rho.cwiseProduct(cfg.alpha * zt +
-                                               (1.0 - cfg.alpha) * zbar - z_new)
-                     : Vec());
+            // Update y: delta_y = alpha * z_tilde + (1 - alpha) * z_prev - z;  y = y + rho * delta_y
+            Vec y_new;
+            if (m > 0) {
+                Vec delta_y = cfg.alpha * z_tilde + (1.0 - cfg.alpha) * zbar - z_new;
+                y_new = ybar + rho.cwiseProduct(delta_y);
+            } else {
+                y_new = Vec::Zero(0);
+            }
 
             // Roll
-            xbar = x_hat;
             zbar = z_new;
             ybar = y_new;
 

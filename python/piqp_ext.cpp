@@ -56,18 +56,18 @@ NB_MODULE(piqp, m) {
         .def_rw("scale_eps", &piqp::PIQPSettings::scale_eps)
         .def_rw("cost_scaling", &piqp::PIQPSettings::cost_scaling);
 
-    nb::class_<piqp::PIQPSolver>(m, "PIQPSolver")
+    nb::class_<piqp::piqp_solver>(m, "piqp_solver")
         .def(nb::init<piqp::PIQPSettings>(),
              nb::arg("settings") = piqp::PIQPSettings{})
         .def(
             "setup",
-            [](piqp::PIQPSolver& solver,
+            [](piqp::piqp_solver& solver,
                const Eigen::Ref<const solvers_py::DenseMatrix>& P,
                const Eigen::Ref<const piqp::Vector>& q,
                const std::optional<Eigen::Ref<const solvers_py::DenseMatrix>>& A,
                const std::optional<Eigen::Ref<const piqp::Vector>>& b,
                const std::optional<Eigen::Ref<const solvers_py::DenseMatrix>>& G,
-               const std::optional<Eigen::Ref<const piqp::Vector>>& h) -> piqp::PIQPSolver& {
+               const std::optional<Eigen::Ref<const piqp::Vector>>& h) -> piqp::piqp_solver& {
                 auto A_sparse = A ? std::optional<piqp::SparseMatrix>((*A).sparseView()) : std::nullopt;
                 auto G_sparse = G ? std::optional<piqp::SparseMatrix>((*G).sparseView()) : std::nullopt;
                 auto b_vec = b ? std::optional<piqp::Vector>(*b) : std::nullopt;
@@ -77,7 +77,7 @@ NB_MODULE(piqp, m) {
             nb::arg("P"), nb::arg("q"), nb::arg("A") = nb::none(),
             nb::arg("b") = nb::none(), nb::arg("G") = nb::none(),
             nb::arg("h") = nb::none(), nb::rv_policy::reference_internal)
-        .def("solve", [](piqp::PIQPSolver& solver) { return result_to_dict(solver.solve()); });
+        .def("solve", [](piqp::piqp_solver& solver) { return result_to_dict(solver.solve()); });
 
     m.def(
         "solve",
@@ -88,7 +88,7 @@ NB_MODULE(piqp, m) {
            const std::optional<Eigen::Ref<const solvers_py::DenseMatrix>>& G,
            const std::optional<Eigen::Ref<const piqp::Vector>>& h,
            const piqp::PIQPSettings& settings) {
-            piqp::PIQPSolver solver(settings);
+            piqp::piqp_solver solver(settings);
             auto A_sparse = A ? std::optional<piqp::SparseMatrix>((*A).sparseView()) : std::nullopt;
             auto G_sparse = G ? std::optional<piqp::SparseMatrix>((*G).sparseView()) : std::nullopt;
             auto b_vec = b ? std::optional<piqp::Vector>(*b) : std::nullopt;

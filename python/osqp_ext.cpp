@@ -69,11 +69,11 @@ NB_MODULE(osqp, m) {
         .def_rw("ruiz_tol", &sosqp::Settings::ruiz_tol)
         .def_rw("check_unscaled", &sosqp::Settings::check_unscaled);
 
-    nb::class_<sosqp::SparseOSQPSolver>(m, "SparseOSQPSolver")
+    nb::class_<sosqp::sparse_osqp_solver>(m, "sparse_osqp_solver")
         .def(nb::init<sosqp::Settings>(), nb::arg("settings") = sosqp::Settings{})
         .def(
             "solve",
-            [](sosqp::SparseOSQPSolver& solver,
+            [](sosqp::sparse_osqp_solver& solver,
                const Eigen::Ref<const solvers_py::DenseMatrix>& P,
                const Eigen::Ref<const sosqp::Vec>& q,
                const Eigen::Ref<const solvers_py::DenseMatrix>& A,
@@ -91,7 +91,7 @@ NB_MODULE(osqp, m) {
            const Eigen::Ref<const sosqp::Vec>& l,
            const Eigen::Ref<const sosqp::Vec>& u,
            const sosqp::Settings& settings) {
-            sosqp::SparseOSQPSolver solver(settings);
+            sosqp::sparse_osqp_solver solver(settings);
             return result_to_dict(solver.solve(to_spmat(P), q, to_spmat(A), l, u));
         },
         nb::arg("P"), nb::arg("q"), nb::arg("A"), nb::arg("l"), nb::arg("u"),

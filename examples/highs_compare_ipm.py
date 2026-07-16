@@ -79,7 +79,7 @@ def solve_highs(problem):
 def solve_ipm(problem, solver_type=SolverType.LDLT):
     lb, ub = bounds_to_vectors(problem["bounds"])
     try:
-        s = ipm_solver.IPSolver()
+        s = ipm_solver.ip_solver()
         s.set_solver_type(solver_type)
         sol = s.solve(
             problem["A_eq"],

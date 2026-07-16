@@ -16,7 +16,7 @@
 #include <string>
 #include <vector>
 
-#include "../ipm/IPSolver.h"
+#include "../ipm/ip_solver.h"
 #include "../ipm/sparse_solver.h"
 
 namespace nb = nanobind;
@@ -75,7 +75,7 @@ IPMSolution solve_ipm(const Eigen::SparseMatrix< double >& A, const Eigen::Vecto
 
     Eigen::VectorXd parsed_sense = parse_sense(std::move(sense), A.rows());
 
-    IPSolver solver;
+    ip_solver solver;
     solver.solve(A, b, c, lb, ub, parsed_sense, tol);
 
     IPMSolution out{solver.getPrimals(), solver.getDuals(), solver.getObjective(), "ipm"};
@@ -113,19 +113,19 @@ NB_MODULE(ipm_solver, m) {
         .def_prop_ro("obj", [](const IPMSolution& self) { return self.objective; })
         .def_prop_ro("objective", [](const IPMSolution& self) { return self.objective; });
 
-    nb::class_< IPSolver >(m, "IPSolver")
+    nb::class_< ip_solver >(m, "ip_solver")
         .def(nb::init<>())
         .def(
             "set_solver_type",
-            [](IPSolver& self, SparseSolver::SolverType type) { self.ls.setSolverType(type); },
+            [](ip_solver& self, SparseSolver::SolverType type) { self.ls.setSolverType(type); },
             nb::arg("type"),
             "Set the sparse linear solver type (LDLT/SUPERNOODAL/FRONTAL). Call before solve().")
         .def(
-            "get_solver_type", [](const IPSolver& self) { return self.ls.activeSolverType(); },
+            "get_solver_type", [](const ip_solver& self) { return self.ls.activeSolverType(); },
             "Return the currently active solver type.")
         .def(
             "solve",
-            [](IPSolver& self, const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
+            [](ip_solver& self, const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
                const Eigen::VectorXd& c, const Eigen::VectorXd& lb, const Eigen::VectorXd& ub,
                nb::object sense, double tol) {
                 Eigen::SparseMatrix< double > sparse_A = A.sparseView();
@@ -142,7 +142,7 @@ NB_MODULE(ipm_solver, m) {
             "Solve min c^T x subject to A x =/<=/>= b and lb <= x <= ub (dense).")
         .def(
             "solve",
-            [](IPSolver& self, const Eigen::SparseMatrix< double >& A, const Eigen::VectorXd& b,
+            [](ip_solver& self, const Eigen::SparseMatrix< double >& A, const Eigen::VectorXd& b,
                const Eigen::VectorXd& c, const Eigen::VectorXd& lb, const Eigen::VectorXd& ub,
                nb::object sense, double tol) {
                 Eigen::VectorXd parsed_sense = parse_sense(std::move(sense), A.rows());
@@ -159,8 +159,8 @@ NB_MODULE(ipm_solver, m) {
 
     m.def("solve_ipm", &solve_ipm_dense, nb::arg("A"), nb::arg("b"), nb::arg("c"), nb::arg("lb"),
           nb::arg("ub"), nb::arg("sense") = nb::none(), nb::arg("tol") = 1e-8,
-          "Convenience wrapper for IPSolver.solve using a dense matrix.");
+          "Convenience wrapper for ip_solver.solve using a dense matrix.");
     m.def("solve_ipm", &solve_ipm, nb::arg("A"), nb::arg("b"), nb::arg("c"), nb::arg("lb"),
           nb::arg("ub"), nb::arg("sense") = nb::none(), nb::arg("tol") = 1e-8,
-          "Convenience wrapper for IPSolver.solve using a sparse matrix.");
+          "Convenience wrapper for ip_solver.solve using a sparse matrix.");
 }

@@ -32,6 +32,7 @@ option(WITH_HIGHWAY "Enable Google Highway for runtime SIMD dispatch (AVX512/AVX
 if(WITH_HIGHWAY)
     message(STATUS "Highway SIMD enabled — runtime ISA dispatch")
     set(LDTLT_WITH_HIGHWAY ON)
+    set(KLU_WITH_HIGHWAY ON)
 endif()
 
 # Module build options
@@ -39,6 +40,7 @@ option(BUILD_OSPQ "Build OSQP solver extension" ON)
 option(BUILD_PIQP "Build PIQP solver extension" ON)
 option(BUILD_QDLDL "Build QDLDL extension" ON)
 option(BUILD_LDLT "Build custom LDLT extension" ON)
+option(BUILD_KLU "Build custom KLU-style LU solver extension" ON)
 option(BUILD_IPM "Build IPM solver extension" ON)
 option(BUILD_PDLP "Build PDLP first-order LP solver extension" ON)
 option(WITH_CUDA "Enable CUDA backend for PDLP" OFF)
@@ -179,11 +181,23 @@ if(BUILD_LDLT)
     list(APPEND SOLVER_TARGETS ldlt_bk_ext)
 endif()
 
+if(BUILD_KLU)
+    nanobind_add_module(klu_ext python/klu_ext.cpp linear_system/klu/klu_impl.cpp)
+    target_link_libraries(klu_ext PRIVATE solvers_headers)
+    set_target_properties(
+        klu_ext
+        PROPERTIES
+        OUTPUT_NAME klu
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    list(APPEND SOLVER_TARGETS klu_ext)
+endif()
+
 if(BUILD_IPM)
     nanobind_add_module(
         ipm_ext
         python/ipm_module.cpp
-        src/ipm/IPSolver.cpp
+        src/ipm/ip_solver.cpp
         # src/ipm/ipm_linear_solver.cpp
     )
     target_link_libraries(ipm_ext PRIVATE solvers_headers stdexec)

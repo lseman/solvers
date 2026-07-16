@@ -1,8 +1,8 @@
 /*
- * @file IPSolver.h
- * @brief Declares IPSolver interfaces and types used by the BALDES solver.
+ * @file ip_solver.h
+ * @brief Declares ip_solver interfaces and types used by the BALDES solver.
  *
- * This file declares the IPSolver interfaces and helper functions used by the
+ * This file declares the ip_solver interfaces and helper functions used by the
  * BALDES solver.
  *
  */
@@ -111,7 +111,7 @@ struct ScalingFactors {
 };
 
 /**
- * @class IPSolver
+ * @class ip_solver
  * @brief A class for solving linear programming problems using an interior
  * point method.
  *
@@ -120,7 +120,7 @@ struct ScalingFactors {
  * optimization process.
  *
  */
-class IPSolver {
+class ip_solver {
 public:
   Residuals res;
   SparseSolver ls;
@@ -151,7 +151,7 @@ public:
   double getObjective() const { return objVal; }
 
   // create default constructor
-  IPSolver() {}
+  ip_solver() {}
   Eigen::SparseMatrix<double>
   convertToSparseDiagonal(const Eigen::VectorXd &vec);
 

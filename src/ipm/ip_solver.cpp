@@ -1,8 +1,8 @@
 /*
- * @file IPSolver.cpp
- * @brief Implements IPSolver functionality for the BALDES solver.
+ * @file ip_solver.cpp
+ * @brief Implements ip_solver functionality for the BALDES solver.
  *
- * This file implements the IPSolver logic used by the BALDES solver.
+ * This file implements the ip_solver logic used by the BALDES solver.
  *
  */
 
@@ -19,7 +19,7 @@
 #include <stdexcept>
 #include <vector>
 
-#include "ipm/IPSolver.h"
+#include "ipm/ip_solver.h"
 
 /**
  * @brief Converts a dense vector to a sparse diagonal matrix.
@@ -28,7 +28,7 @@
  * matrix. The resulting sparse matrix has non-zero values only on its diagonal,
  * where the values are taken from the input vector.
  */
-Eigen::SparseMatrix< double > IPSolver::convertToSparseDiagonal(const Eigen::VectorXd& vec) {
+Eigen::SparseMatrix< double > ip_solver::convertToSparseDiagonal(const Eigen::VectorXd& vec) {
     Eigen::SparseMatrix< double > mat(vec.size(), vec.size());
     mat = vec.asDiagonal();
     return mat;
@@ -43,7 +43,7 @@ Eigen::SparseMatrix< double > IPSolver::convertToSparseDiagonal(const Eigen::Vec
  * constraints as equalities.
  *
  */
-void IPSolver::convert_to_standard_form(const Eigen::SparseMatrix< double >& A,
+void ip_solver::convert_to_standard_form(const Eigen::SparseMatrix< double >& A,
                                         const Eigen::VectorXd& b, const Eigen::VectorXd& c,
                                         const Eigen::VectorXd& lb, const Eigen::VectorXd& ub,
                                         const Eigen::VectorXd& sense,
@@ -151,7 +151,7 @@ void IPSolver::convert_to_standard_form(const Eigen::SparseMatrix< double >& A,
  * norms.
  *
  */
-void IPSolver::update_residuals(Residuals& res, const Eigen::VectorXd& x,
+void ip_solver::update_residuals(Residuals& res, const Eigen::VectorXd& x,
                                 const Eigen::VectorXd& lambda, const Eigen::VectorXd& s,
                                 const Eigen::VectorXd& v, const Eigen::VectorXd& w,
                                 const Eigen::SparseMatrix< double >& A, const Eigen::VectorXd& b,
@@ -210,7 +210,7 @@ void IPSolver::update_residuals(Residuals& res, const Eigen::VectorXd& x,
  * or the regularized approach based on the preprocessor directive `AUGMENTED`.
  *
  */
-void IPSolver::solve_augmented_system(Eigen::VectorXd& dx, Eigen::VectorXd& dy, SparseSolver& ls,
+void ip_solver::solve_augmented_system(Eigen::VectorXd& dx, Eigen::VectorXd& dy, SparseSolver& ls,
                                       const Eigen::VectorXd& xi_p, const Eigen::VectorXd& xi_d) {
     // Set-up right-hand side with preserved order
     Eigen::VectorXd xi(xi_d.size() + xi_p.size());
@@ -224,7 +224,7 @@ void IPSolver::solve_augmented_system(Eigen::VectorXd& dx, Eigen::VectorXd& dy, 
     dy = d.tail(xi_p.size()); // Gets the last m elements
 }
 
-void IPSolver::solve_augsys(Eigen::VectorXd& delta_x, Eigen::VectorXd& delta_y,
+void ip_solver::solve_augsys(Eigen::VectorXd& delta_x, Eigen::VectorXd& delta_y,
                             Eigen::VectorXd& delta_z, SparseSolver& ls,
                             const Eigen::VectorXd& theta_vw, const Eigen::VectorXi& ubi,
                             const Eigen::VectorXd& xi_p, const Eigen::VectorXd& xi_d,
@@ -277,7 +277,7 @@ void IPSolver::solve_augsys(Eigen::VectorXd& delta_x, Eigen::VectorXd& delta_y,
  * This version eliminates redundant computations, improves clarity,
  * reduces temporary allocations, and fixes scoping issues from the original.
  */
-void IPSolver::solve_newton_system(
+void ip_solver::solve_newton_system(
     Eigen::VectorXd& Delta_x, Eigen::VectorXd& Delta_lambda, Eigen::VectorXd& Delta_w,
     Eigen::VectorXd& Delta_s, Eigen::VectorXd& Delta_v, double& Delta_tau, double& Delta_kappa,
     SparseSolver& ls, const Eigen::VectorXd& theta_vw, const Eigen::VectorXd& b,
@@ -330,7 +330,7 @@ void IPSolver::solve_newton_system(
  * alpha values is returned as the result.
  *
  */
-double IPSolver::max_alpha_single(const Eigen::VectorXd& v, const Eigen::VectorXd& dv) {
+double ip_solver::max_alpha_single(const Eigen::VectorXd& v, const Eigen::VectorXd& dv) {
     double alpha = std::numeric_limits< double >::infinity();
 
     // Get direct access to data
@@ -374,7 +374,7 @@ double IPSolver::max_alpha_single(const Eigen::VectorXd& v, const Eigen::VectorX
  * it takes into account the step sizes for tau and kappa.
  *
  */
-double IPSolver::max_alpha(const Eigen::VectorXd& x, const Eigen::VectorXd& dx,
+double ip_solver::max_alpha(const Eigen::VectorXd& x, const Eigen::VectorXd& dx,
                            const Eigen::VectorXd& v, const Eigen::VectorXd& dv,
                            const Eigen::VectorXd& s, const Eigen::VectorXd& ds,
                            const Eigen::VectorXd& w, const Eigen::VectorXd& dw, double tau,
@@ -419,7 +419,7 @@ double IPSolver::max_alpha(const Eigen::VectorXd& x, const Eigen::VectorXd& dx,
  * problem until convergence or the maximum number of iterations is reached.
  *
  */
-void IPSolver::solve(const Eigen::SparseMatrix< double >& A, const Eigen::VectorXd& b,
+void ip_solver::solve(const Eigen::SparseMatrix< double >& A, const Eigen::VectorXd& b,
                      const Eigen::VectorXd& c, const Eigen::VectorXd& lb, const Eigen::VectorXd& ub,
                      const Eigen::VectorXd& sense, double tol) {
     OptimizationData data;
@@ -433,7 +433,7 @@ void IPSolver::solve(const Eigen::SparseMatrix< double >& A, const Eigen::Vector
     run_optimization(data, tol);
 }
 
-void IPSolver::run_optimization(const OptimizationData& data, const double tol) {
+void ip_solver::run_optimization(const OptimizationData& data, const double tol) {
     const Eigen::SparseMatrix< double >& As = data.As;
     const Eigen::VectorXd& bs = data.bs;
     const Eigen::VectorXd& cs = data.cs;
@@ -715,7 +715,7 @@ void IPSolver::run_optimization(const OptimizationData& data, const double tol) 
 }
 
 #ifdef GUROBI
-OptimizationData IPSolver::extractOptimizationComponents(GRBModel& model) {
+OptimizationData ip_solver::extractOptimizationComponents(GRBModel& model) {
     OptimizationData data;
     int numConstrs = model.get(GRB_IntAttr_NumConstrs);
     int numVars = model.get(GRB_IntAttr_NumVars);
@@ -775,7 +775,7 @@ OptimizationData IPSolver::extractOptimizationComponents(GRBModel& model) {
 }
 #endif
 
-OptimizationData IPSolver::convertToOptimizationData(const ModelData& modelData) {
+OptimizationData ip_solver::convertToOptimizationData(const ModelData& modelData) {
     OptimizationData optData;
 
     optData.As = modelData.A_sparse.toEigenSparseMatrix();
@@ -801,7 +801,7 @@ OptimizationData IPSolver::convertToOptimizationData(const ModelData& modelData)
     return optData;
 }
 
-int IPSolver::update_linear_solver(SparseSolver& ls, const Eigen::VectorXd& theta,
+int ip_solver::update_linear_solver(SparseSolver& ls, const Eigen::VectorXd& theta,
                                    const Eigen::VectorXd& regP, const Eigen::VectorXd& regD) {
     // Update internal data
     ls.theta = theta;
@@ -830,7 +830,7 @@ int IPSolver::update_linear_solver(SparseSolver& ls, const Eigen::VectorXd& thet
  * performing factorization.
  *
  */
-void IPSolver::start_linear_solver(SparseSolver& ls, const Eigen::SparseMatrix< double >& A) {
+void ip_solver::start_linear_solver(SparseSolver& ls, const Eigen::SparseMatrix< double >& A) {
     ls.A = A;
     ls.m = A.rows();
     ls.n = A.cols();

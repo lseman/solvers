@@ -85,14 +85,14 @@ struct PIQPResult {
 };
 
 /// Interior-point solver for convex QPs (sparse matrices only).
-class PIQPSolver {
+class piqp_solver {
    public:
-    explicit PIQPSolver(const PIQPSettings& settings = PIQPSettings{})
+    explicit piqp_solver(const PIQPSettings& settings = PIQPSettings{})
         : settings_(settings) {}
 
     /// Configure problem: minimize ½xᵀPx + qᵀx s.t. Ax=b, Gx≤h.
     /// Any constraint may be nullopt (omitted). Pattern analyzed at setup time.
-    PIQPSolver& setup(const SparseMatrix& P, const Vector& q,
+    piqp_solver& setup(const SparseMatrix& P, const Vector& q,
                       const std::optional<SparseMatrix>& A = std::nullopt,
                       const std::optional<Vector>& b = std::nullopt,
                       const std::optional<SparseMatrix>& G = std::nullopt,
@@ -259,13 +259,24 @@ class PIQPSolver {
             solvePsiNewton_(rx_aff, ry_aff, rz_aff, rs_cor, lambda_weights,
                             inv_delta, dx_cor, dy_cor, dz_cor, ds_cor);
 
-            // -------- Take step --------
-            const double alpha = fractionToBoundary(s_, ds_cor, z_, dz_cor);
-            x_ += alpha * dx_cor;
-            if (p_ > 0) y_ += alpha * dy_cor;
+            // -------- Take step (separate primal and dual steps per PIQP) --------
+            // Calculate step in the non-negative orthant for s and z separately
+            double alpha_s = 1.0, alpha_z = 1.0;
             if (m_ > 0) {
-                s_ += alpha * ds_cor;
-                z_ += alpha * dz_cor;
+                for (int i = 0; i < m_; ++i) {
+                    if (ds_cor(i) < 0) alpha_s = std::min(alpha_s, -s_(i) / ds_cor(i));
+                    if (dz_cor(i) < 0) alpha_z = std::min(alpha_z, -z_(i) / dz_cor(i));
+                }
+            }
+            // avoid getting to close to the boundary
+            const double primal_step = alpha_s * settings_.tau;
+            const double dual_step = alpha_z * settings_.tau;
+
+            x_ += primal_step * dx_cor;
+            if (p_ > 0) y_ += dual_step * dy_cor;
+            if (m_ > 0) {
+                s_ += primal_step * ds_cor;
+                z_ += dual_step * dz_cor;
                 s_ = s_.array().max(settings_.min_slack);
                 z_ = z_.array().max(settings_.min_slack);
             }
@@ -355,7 +366,7 @@ class PIQPSolver {
     /// Warm-start the solver with initial iterates (x, y, z, s).
     /// std::nullopt leaves the corresponding variable in place.
     /// Set copy_to_prox_centers=true to sync prox centers (xi, lambda, nu).
-    PIQPSolver& warm_start(const std::optional<Vector>& x = std::nullopt,
+    piqp_solver& warm_start(const std::optional<Vector>& x = std::nullopt,
                            const std::optional<Vector>& y = std::nullopt,
                            const std::optional<Vector>& z = std::nullopt,
                            const std::optional<Vector>& s = std::nullopt,
@@ -385,7 +396,7 @@ class PIQPSolver {
     }
 
     // Explicit prox-center warm start (does not touch x,y,z,s)
-    PIQPSolver& set_prox_centers(const std::optional<Vector>& xi,
+    piqp_solver& set_prox_centers(const std::optional<Vector>& xi,
                                  const std::optional<Vector>& lambda,
                                  const std::optional<Vector>& nu) {
         if (xi) {
@@ -405,7 +416,7 @@ class PIQPSolver {
 
     // Convenience: prime next solve with the solver's current iterates.
     // (also primes prox centers unless also_prox=false)
-    PIQPSolver& use_last_as_warm_start(bool also_prox = true) {
+    piqp_solver& use_last_as_warm_start(bool also_prox = true) {
         if (also_prox) {
             xi_ = x_;
             if (p_ > 0) lambda_ = y_;
@@ -415,7 +426,7 @@ class PIQPSolver {
     }
 
     // Quick knobs to reset proximal penalties before a new solve
-    PIQPSolver& set_prox_params(double rho, double delta) {
+    piqp_solver& set_prox_params(double rho, double delta) {
         rho_ = std::max(rho, settings_.rho_floor);
         delta_ = std::max(delta, settings_.delta_floor);
         return *this;
@@ -424,7 +435,7 @@ class PIQPSolver {
     // ---- Numeric update for SQP loops (pattern-stable fast path) ----
     // Update values of P,q,A,b,G,h. If same_pattern=true (default), we REUSE
     // the analyzed pattern of Ψ; else we rebuild it (one-time analyzePattern).
-    PIQPSolver& update_values(
+    piqp_solver& update_values(
         const SparseMatrix& P, const Vector& q,
         const std::optional<SparseMatrix>& A = std::nullopt,
         const std::optional<Vector>& b = std::nullopt,
