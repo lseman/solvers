@@ -49,6 +49,8 @@ struct NumericResult {
     int unz;                  // Nonzeros in U (including diagonal)
     std::vector<int> Pnum;    // Final pivot permutation
     std::vector<int> Pinv;    // Inverse pivot permutation
+    std::vector<int> Qnum;    // Factor column -> original column
+    std::vector<double> Rs;   // Original-row scale factors
     std::vector<int> Lip;     // L column pointers per block
     std::vector<int> Uip;     // U column pointers per block
     std::vector<int> Lp;      // L column pointers (full)
@@ -89,10 +91,6 @@ private:
 
     // AMD ordering for a submatrix
     std::vector<int> amd_block(const SparseCSC<int>& A, int block_start, int block_end) const;
-
-    // Sparse LU factorization for a single block
-    NumericResult factorize_block(const SparseCSC<int>& A, int block_start, int block_end,
-                                  const std::vector<int>& block_perm);
 
     // Backward substitution
     void solve_lower(const std::vector<int>& Li, const std::vector<double>& Lx,
