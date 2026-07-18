@@ -130,15 +130,16 @@ class KKTQuasiDef {
         return update_schur_complement(new_rho);
     }
 
-    // Solve K [x; y] = [rhs1; rhs2]
-    std::pair<Vec, Vec> solve(const Vec& rhs1, const Vec& rhs2) const {
+    // Solve K [x; nu] = [rhs1; rhs2] for x
+    // K = [H, A^T; A, -rho^{-1}] (quasi-definite); nu is only an
+    // intermediate via the Schur complement.
+    Vec solve(const Vec& rhs1, const Vec& rhs2) const {
         Vec t = H_.solve(rhs1);   // t = H^{-1} rhs1
         Vec At = A_times_vec(t);  // At = A t
-        Vec rhs_y = At - rhs2;
-        Vec y = S_.solve(rhs_y);
-        Vec ATy = AT_times_vec(y);
-        Vec x = H_.solve(rhs1 - ATy);
-        return {x, y};
+        Vec rhs_y = At - rhs2;    // = A*H^{-1}*rhs1 - rhs2
+        Vec nu = S_.solve(rhs_y);
+        Vec ATnu = AT_times_vec(nu);
+        return H_.solve(rhs1 - ATnu);
     }
 
    private:
@@ -630,19 +631,25 @@ class sparse_osqp_solver {
         constexpr Scalar kRhoFloor = 1e-30;
 
         for (int k = 0; k < cfg.max_iter; ++k) {
-            // ===== OSQP ADMM steps: compute x_tilde_rhs and z_tilde_rhs
+            // ===== OSQP ADMM steps
             Vec x_tilde_rhs = cfg.sigma * xbar - q_use;
             Vec rho_inv = rho.cwiseInverse();
-            Vec z_tilde_rhs = (m > 0 ? (zbar - rho_inv.cwiseProduct(ybar)) : Vec::Zero(0));
 
-            // ===== Solve KKT or NE for [x_tilde; z_tilde]
+            // ===== Solve KKT or NE for x_tilde
+            // KKT RHS: [sigma*xbar - q; zbar - rho_inv*ybar] (matches official OSQP)
+            // KKT matrix: [H, A^T; A, -rho^{-1}]  (quasi-definite)
+            // The second KKT solution component is nu (dual of the equality-
+            // constrained sub-QP), NOT z_tilde. Official OSQP recovers
+            //   z_tilde = rhs_z + rho^{-1}*nu, which algebraically equals
+            //   z_tilde = A*x_tilde  (from row 2: A*x_tilde - rho^{-1}*nu = rhs_z).
             Vec x_tilde, z_tilde;
             if (use_kkt) {
-                auto xz_tilde = KKT.solve(x_tilde_rhs, z_tilde_rhs);
-                x_tilde = xz_tilde.first;
-                z_tilde = xz_tilde.second;
+                Vec z_tilde_rhs = (m > 0)
+                                      ? Vec(zbar - rho_inv.cwiseProduct(ybar))
+                                      : Vec(Vec::Zero(0));
+                x_tilde = KKT.solve(x_tilde_rhs, z_tilde_rhs);
             } else {
-                Vec rhs = cfg.sigma * xbar - q_use;
+                Vec rhs = x_tilde_rhs;
                 if (m > 0)
                     rhs += A_use.transpose() * (rho.cwiseProduct(zbar) - ybar);
                 x_tilde = NEF.solve(rhs);
@@ -652,29 +659,32 @@ class sparse_osqp_solver {
                     Vec dx_corr = NEF.solve(r_lin);
                     x_tilde += dx_corr;
                 }
-                // Compute z_tilde from x_tilde using the second KKT row:
-                // A x_tilde - diag(rho)^-1 z_tilde = z_tilde_rhs  =>  z_tilde = rho * (A x_tilde - z_tilde_rhs)
-                Vec Ax_tilde = (m > 0 ? A_use * x_tilde : Vec::Zero(m));
-                z_tilde = (m > 0 ? rho.cwiseProduct(Ax_tilde - z_tilde_rhs) : Vec::Zero(0));
+            }
+            // z_tilde = A*x_tilde (both paths; see comment above)
+            if (m > 0) {
+                z_tilde = A_use * x_tilde;
+            } else {
+                z_tilde = Vec::Zero(0);
             }
 
-            // ===== Over-relaxation and (z,y) updates (scaled) - standard OSQP ADMM steps
-            // Update x: x = alpha * x_tilde + (1 - alpha) * x_prev
+            // ===== Over-relaxation and (z,y) updates - official OSQP ADMM steps
+            // Official update_z: z = alpha * z_tilde + (1-alpha) * z_prev + rho_inv * y
+            //                   = zbar + alpha*(z_tilde - zbar) + rho_inv * ybar
+            // Official update_y: delta_y = alpha * z_tilde + (1-alpha) * zbar - z_new
+            //                   y = y + rho * delta_y
             xbar = cfg.alpha * x_tilde + (1.0 - cfg.alpha) * xbar;
 
-            // Update z: z = alpha * z_tilde + (1 - alpha) * z_prev + rho_inv * y, then project onto [l, u]
             Vec z_new;
             if (m > 0) {
-                z_new = cfg.alpha * z_tilde + (1.0 - cfg.alpha) * zbar + rho_inv.cwiseProduct(ybar);
+                z_new = zbar + cfg.alpha * (z_tilde - zbar) + rho_inv.cwiseProduct(ybar);
                 z_new = project_box(z_new, l_use, u_use);
             } else {
                 z_new = Vec::Zero(0);
             }
 
-            // Update y: delta_y = alpha * z_tilde + (1 - alpha) * z_prev - z;  y = y + rho * delta_y
             Vec y_new;
             if (m > 0) {
-                Vec delta_y = cfg.alpha * z_tilde + (1.0 - cfg.alpha) * zbar - z_new;
+                Vec delta_y = zbar + cfg.alpha * (z_tilde - zbar) - z_new;
                 y_new = ybar + rho.cwiseProduct(delta_y);
             } else {
                 y_new = Vec::Zero(0);
@@ -801,93 +811,104 @@ class sparse_osqp_solver {
             }
 
             // ---- Infeasibility certificates (ORIGINAL space)
-            Vec dx_bar = xbar - x_prev;
-            Vec dz_bar = zbar - z_prev2;
-            Vec dy_bar = ybar - y_prev;
+            // Skip certificates during the early iterations (first stall_cnt
+            // checks) to avoid false positives when dx/dy norms are near zero.
+            // Infeasibility certificates are only meaningful once the solver
+            // has had time to make meaningful progress.
+            if (stall_cnt >= 2) {
+                Vec dx_bar = xbar - x_prev;
+                Vec dz_bar = zbar - z_prev2;
+                Vec dy_bar = ybar - y_prev;
 
-            Vec dx_orig = dx_bar;
-            Vec dy_orig = dy_bar;
-            if (S.enabled) {
-                dx_orig = S.Dx.cwiseProduct(dx_bar);
-                dy_orig = (1.0 / S.c) * S.Ez.cwiseProduct(dy_bar);
-            }
-
-            x_prev = xbar;
-            z_prev2 = zbar;
-            y_prev = ybar;
-
-            if (m > 0) {
-                Vec ATdy = A.transpose() * dy_orig;
-                const Scalar dy_norm =
-                    std::max<Scalar>(1e-30, inf_norm(dy_orig));
-                bool pinf1 = (inf_norm(ATdy) <= cfg.eps_pinf * dy_norm);
-                Scalar s2 = 0.0;
-                for (int i = 0; i < m; ++i) {
-                    Scalar ui = std::isfinite(u[i]) ? u[i] : 0.0;
-                    Scalar li = std::isfinite(l[i]) ? l[i] : 0.0;
-                    const Scalar pos = std::max(dy_orig[i], 0.0);
-                    const Scalar neg = std::min(dy_orig[i], 0.0);
-                    s2 += ui * pos + li * neg;
+                Vec dx_orig = dx_bar;
+                Vec dy_orig = dy_bar;
+                if (S.enabled) {
+                    dx_orig = S.Dx.cwiseProduct(dx_bar);
+                    dy_orig = (1.0 / S.c) * S.Ez.cwiseProduct(dy_bar);
                 }
-                bool pinf2 = (s2 <= cfg.eps_pinf * dy_norm);
-                if (pinf1 && pinf2) {
-                    primal_inf_flag = true;
-                    dy_cert = dy_orig;
-                }
-            }
 
-            {
-                const Scalar dx_norm =
-                    std::max<Scalar>(1e-30, inf_norm(dx_orig));
-                Vec Pdx = P * dx_orig;
-                bool dinf1 = (inf_norm(Pdx) <= cfg.eps_dinf * dx_norm);
-                bool dinf2 = (q.dot(dx_orig) <= cfg.eps_dinf * dx_norm);
+                x_prev = xbar;
+                z_prev2 = zbar;
+                y_prev = ybar;
 
-                bool dinf3 = true;
                 if (m > 0) {
-                    Vec Adx = A * dx_orig;
+                    Vec ATdy = A.transpose() * dy_orig;
+                    const Scalar dy_norm =
+                        std::max<Scalar>(1e-30, inf_norm(dy_orig));
+                    bool pinf1 =
+                        (inf_norm(ATdy) <= cfg.eps_pinf * dy_norm);
+                    Scalar s2 = 0.0;
                     for (int i = 0; i < m; ++i) {
-                        if (std::isfinite(l[i]) && std::isfinite(u[i])) {
-                            if (std::fabs(Adx[i]) > cfg.eps_dinf * dx_norm) {
-                                dinf3 = false;
-                                break;
-                            }
-                        } else if (!std::isfinite(u[i])) {  // only lower bound
-                            if (Adx[i] < -cfg.eps_dinf * dx_norm) {
-                                dinf3 = false;
-                                break;
-                            }
-                        } else if (!std::isfinite(l[i])) {  // only upper bound
-                            if (Adx[i] > cfg.eps_dinf * dx_norm) {
-                                dinf3 = false;
-                                break;
+                        Scalar ui = std::isfinite(u[i]) ? u[i] : 0.0;
+                        Scalar li = std::isfinite(l[i]) ? l[i] : 0.0;
+                        const Scalar pos = std::max(dy_orig[i], 0.0);
+                        const Scalar neg = std::min(dy_orig[i], 0.0);
+                        s2 += ui * pos + li * neg;
+                    }
+                    bool pinf2 = (s2 <= cfg.eps_pinf * dy_norm);
+                    if (pinf1 && pinf2) {
+                        primal_inf_flag = true;
+                        dy_cert = dy_orig;
+                    }
+                }
+
+                {
+                    const Scalar dx_norm =
+                        std::max<Scalar>(1e-30, inf_norm(dx_orig));
+                    Vec Pdx = P * dx_orig;
+                    bool dinf1 = (inf_norm(Pdx) <= cfg.eps_dinf * dx_norm);
+                    bool dinf2 = (q.dot(dx_orig) <= cfg.eps_dinf * dx_norm);
+
+                    bool dinf3 = true;
+                    if (m > 0) {
+                        Vec Adx = A * dx_orig;
+                        for (int i = 0; i < m; ++i) {
+                            if (std::isfinite(l[i]) &&
+                                std::isfinite(u[i])) {
+                                if (std::fabs(Adx[i]) >
+                                    cfg.eps_dinf * dx_norm) {
+                                    dinf3 = false;
+                                    break;
+                                }
+                            } else if (!std::isfinite(u[i])) {
+                                // only lower bound
+                                if (Adx[i] < -cfg.eps_dinf * dx_norm) {
+                                    dinf3 = false;
+                                    break;
+                                }
+                            } else if (!std::isfinite(l[i])) {
+                                // only upper bound
+                                if (Adx[i] > cfg.eps_dinf * dx_norm) {
+                                    dinf3 = false;
+                                    break;
+                                }
                             }
                         }
                     }
+                    if (dinf1 && dinf2 && dinf3) {
+                        dual_inf_flag = true;
+                        dx_cert = dx_orig;
+                    }
                 }
-                if (dinf1 && dinf2 && dinf3) {
-                    dual_inf_flag = true;
-                    dx_cert = dx_orig;
-                }
-            }
 
-            if (primal_inf_flag || dual_inf_flag) {
-                Vec x_ret = xbar, z_ret = zbar, y_ret = ybar;
-                map_solution_from_scaled(S, x_ret, z_ret, y_ret);
-                out.status =
-                    primal_inf_flag ? "primal_infeasible" : "dual_infeasible";
-                out.iters = k + 1;
-                out.x = x_ret;
-                out.z = z_ret;
-                out.y = y_ret;
-                out.res = compute_residuals(P, A, out.x, out.z, q, out.y);
-                out.obj_val = 0.5 * out.x.dot(P * out.x) + q.dot(out.x);
-                out.primal_infeasible = primal_inf_flag;
-                out.dual_infeasible = dual_inf_flag;
-                out.y_cert = dy_cert;
-                out.x_cert = dx_cert;
-                return out;
-            }
+                if (primal_inf_flag || dual_inf_flag) {
+                    Vec x_ret = xbar, z_ret = zbar, y_ret = ybar;
+                    map_solution_from_scaled(S, x_ret, z_ret, y_ret);
+                    out.status =
+                        primal_inf_flag ? "primal_infeasible" : "dual_infeasible";
+                    out.iters = k + 1;
+                    out.x = x_ret;
+                    out.z = z_ret;
+                    out.y = y_ret;
+                    out.res = compute_residuals(P, A, out.x, out.z, q, out.y);
+                    out.obj_val = 0.5 * out.x.dot(P * out.x) + q.dot(out.x);
+                    out.primal_infeasible = primal_inf_flag;
+                    out.dual_infeasible = dual_inf_flag;
+                    out.y_cert = dy_cert;
+                    out.x_cert = dx_cert;
+                    return out;
+                }
+            }  // end stall_cnt >= 2 block
 
             // ---- Adaptive rho (global rescale). Cheap refactor with NEFast.
             if (cfg.adaptive_rho && m > 0) {
@@ -981,6 +1002,8 @@ class sparse_osqp_solver {
             out.y = y_ret;
             out.res = compute_residuals(P, A, out.x, out.z, q, out.y);
             out.obj_val = 0.5 * out.x.dot(P * out.x) + q.dot(out.x);
+            out.status = "max_iter_reached";
+            out.iters = cfg_.max_iter;
             return out;
         }
     }

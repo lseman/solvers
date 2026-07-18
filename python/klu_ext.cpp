@@ -61,7 +61,10 @@ nb::dict solve_dense(const Eigen::Ref< const DenseMatrix >& A,
     auto x = solver.solve(num, bv);
 
     nb::dict out;
-    out["x"] = Eigen::Map< Eigen::VectorXd >(x.data(), static_cast< Eigen::Index >(x.size()));
+    // Copy into an owned vector: a Map over the local `x` would dangle once
+    // this function returns.
+    out["x"] = Eigen::VectorXd(
+        Eigen::Map< const Eigen::VectorXd >(x.data(), static_cast< Eigen::Index >(x.size())));
     out["n"] = num.n;
     out["nblocks"] = num.nblocks;
     out["nnz_L"] = num.lnz;

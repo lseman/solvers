@@ -43,6 +43,7 @@ option(BUILD_LDLT "Build custom LDLT extension" ON)
 option(BUILD_KLU "Build custom KLU-style LU solver extension" ON)
 option(BUILD_IPM "Build IPM solver extension" ON)
 option(BUILD_PDLP "Build PDLP first-order LP solver extension" ON)
+option(BUILD_SUPERSONAL "Build supernodal LDLT extension" ON)
 option(WITH_CUDA "Enable CUDA backend for PDLP" OFF)
 option(BUILD_SOLVER_TESTS "Build solver C++ tests" OFF)
 
@@ -254,6 +255,18 @@ if(BUILD_PDLP)
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     list(APPEND SOLVER_TARGETS pdlp_ext)
+endif()
+
+if(BUILD_SUPERSONAL)
+    nanobind_add_module(supernodal_ext python/solvers/supernodal_ext.cpp)
+    target_link_libraries(supernodal_ext PRIVATE solvers_headers)
+    set_target_properties(
+        supernodal_ext
+        PROPERTIES
+        OUTPUT_NAME supernodal
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/solvers
+    )
+    list(APPEND SOLVER_TARGETS supernodal_ext)
 endif()
 
 if(SOLVER_TARGETS)
