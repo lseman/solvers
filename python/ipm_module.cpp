@@ -102,7 +102,9 @@ NB_MODULE(ipm_solver, m) {
         .value("LDLT", SparseSolver::SolverType::LDLT)
         .value("SUPERNOODAL", SparseSolver::SolverType::SUPERNOODAL)
         .value("FRONTAL", SparseSolver::SolverType::FRONTAL)
-        .value("QD_LDLT", SparseSolver::SolverType::QD_LDLT)
+        .value("HIPO_LDLT", SparseSolver::SolverType::HIPO_LDLT)
+        .value("NORMAL_EQ", SparseSolver::SolverType::NORMAL_EQ)
+        .value("AUTO", SparseSolver::SolverType::AUTO)
         .export_values();
 
     nb::class_< IPMSolution >(m, "IPMSolution")

@@ -358,10 +358,12 @@ template < typename Scalar = double, typename Index = int32_t > class Simplicial
     std::vector< Scalar > solveImpl(const std::vector< Scalar >& b) const {
         std::vector< Scalar > x = b;
 
-        // Permute: x_perm[new] = b[old] = b[iperm[new]].
-        if (!m_ordering.iperm.empty()) {
+        // Permute: x_perm[new] = b[perm[new]] = b[old]. m_ordering.perm holds
+        // perm[new] = old (see Ordering::from_perm / linsys::amd_ordering),
+        // so the forward gather must index with perm, not iperm.
+        if (!m_ordering.perm.empty()) {
             std::vector< Scalar > y(static_cast< size_t >(m_size));
-            linsys::permute_gather(m_size, m_ordering.iperm.data(), x.data(), y.data());
+            linsys::permute_gather(m_size, m_ordering.perm.data(), x.data(), y.data());
             x = std::move(y);
         }
 
@@ -388,11 +390,12 @@ template < typename Scalar = double, typename Index = int32_t > class Simplicial
         linsys::ltsolve_unit(m_size, m_factors.Lp.data(), m_factors.Li.data(),
                              m_factors.Lx.data(), x.data());
 
-        // Un-permute: x_original = P^T x_permuted.
-        // P[old] = new, so x_old = x_perm[P[old]].
+        // Un-permute: x_old[old] = x_perm[iperm[old]]. m_ordering.iperm holds
+        // iperm[old] = new, the inverse of perm, so the backward gather must
+        // index with iperm here.
         std::vector< Scalar > result(static_cast< size_t >(m_size));
-        if (!m_ordering.perm.empty()) {
-            linsys::permute_gather(m_size, m_ordering.perm.data(), x.data(), result.data());
+        if (!m_ordering.iperm.empty()) {
+            linsys::permute_gather(m_size, m_ordering.iperm.data(), x.data(), result.data());
         } else {
             result = std::move(x);
         }

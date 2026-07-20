@@ -808,9 +808,9 @@ int ip_solver::update_linear_solver(SparseSolver& ls, const Eigen::VectorXd& the
     ls.regP = regP;
     ls.regD = regD;
 
-    // QD_LDLT builds augmented system from A + theta/regP/regD internally,
-    // skip updating pre-built S
-    if (!ls.useQDLDLT) {
+    // HIPO_LDLT builds the augmented system from A +
+    // theta/regP/regD internally, so skip updating the pre-built S.
+    if (!ls.useInternalAugmentedSolver) {
         for (int i = 0; i < ls.n; ++i) {
             ls.S.coeffRef(i, i) = -theta[i] - regP[i];
         }

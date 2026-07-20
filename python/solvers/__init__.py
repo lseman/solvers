@@ -33,5 +33,21 @@ if _so is not None:
 else:
     SupernodalLDLT = None
 
-__all__ = ["SupernodalLDLT"]
-del _build_dir, _build_dir_str, _pkg_dir, _project_root
+_sn_so = next(_build_dir.glob("supernodes.*.so"), None)
+if _sn_so is not None:
+    # The .so exports a module named "supernodes" (output_name in CMake).
+    _sn_build_dir_str = str(_sn_so.parent)
+    if _sn_build_dir_str not in sys.path:
+        sys.path.insert(0, _sn_build_dir_str)
+    try:
+        _sn_mod = importlib.import_module("supernodes")
+        identify_supernodes = getattr(_sn_mod, "identify_supernodes", None)
+        del _sn_mod
+    except Exception:
+        identify_supernodes = None
+    del _sn_so, _sn_build_dir_str
+else:
+    identify_supernodes = None
+
+__all__ = ["SupernodalLDLT", "identify_supernodes"]
+del _build_dir, _pkg_dir, _project_root

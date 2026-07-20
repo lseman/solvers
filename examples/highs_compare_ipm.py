@@ -146,7 +146,7 @@ for problem in problems:
         solve_ipm(problem, SolverType.LDLT),
         solve_ipm(problem, SolverType.FRONTAL),
         solve_ipm(problem, SolverType.SUPERNOODAL),
-        solve_ipm(problem, SolverType.QD_LDLT),
+        solve_ipm(problem, SolverType.HIPO_LDLT),
     ]:
         x = result["x"]
         rows.append({

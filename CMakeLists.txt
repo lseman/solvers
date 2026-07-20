@@ -45,6 +45,7 @@ option(BUILD_IPM "Build IPM solver extension" ON)
 option(BUILD_PDLP "Build PDLP first-order LP solver extension" ON)
 option(BUILD_SUPERSONAL "Build supernodal LDLT extension" ON)
 option(WITH_CUDA "Enable CUDA backend for PDLP" OFF)
+option(WITH_METIS "Enable METIS graph partitioning library" OFF)
 option(BUILD_SOLVER_TESTS "Build solver C++ tests" OFF)
 
 include(FetchContent)
@@ -95,6 +96,21 @@ if(WITH_HIGHWAY)
     )
     if(highway_ADDED)
         message(STATUS "Highway fetched via CPM")
+    endif()
+endif()
+
+# METIS: graph partitioning and sparse matrix reordering
+if(WITH_METIS)
+    CPMAddPackage(
+        NAME METIS
+        GIT_REPOSITORY https://github.com/KarypisLab/METIS.git
+        GIT_TAG v5.1.1
+        OPTIONS
+            "BUILD_SHARED_LIBS OFF"
+            "METIS_ENABLE_DEBUG ON"
+    )
+    if(METIS_ADDED)
+        message(STATUS "METIS fetched via CPM")
     endif()
 endif()
 
@@ -210,21 +226,6 @@ if(BUILD_IPM)
     )
     list(APPEND SOLVER_TARGETS ipm_ext)
 
-    # Quasi-definite augmented-system solver (BK pivoting + iterative refinement)
-    nanobind_add_module(ipm_qd python/ipm_qd_ext.cpp)
-    target_link_libraries(ipm_qd PRIVATE solvers_headers)
-    if(WITH_HIGHWAY)
-        target_compile_definitions(ipm_qd PRIVATE LDLT_WITH_HIGHWAY)
-        target_include_directories(ipm_qd PRIVATE ${highway_SOURCE_DIR}/src)
-        target_link_libraries(ipm_qd PRIVATE highway::highway)
-    endif()
-    set_target_properties(
-        ipm_qd
-        PROPERTIES
-        OUTPUT_NAME ipm_qd
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
-    )
-    list(APPEND SOLVER_TARGETS ipm_qd)
 endif()
 
 if(BUILD_PDLP)
@@ -267,6 +268,16 @@ if(BUILD_SUPERSONAL)
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/solvers
     )
     list(APPEND SOLVER_TARGETS supernodal_ext)
+
+    nanobind_add_module(supernodes_ext python/solvers/supernodes_ext.cpp)
+    target_link_libraries(supernodes_ext PRIVATE solvers_headers)
+    set_target_properties(
+        supernodes_ext
+        PROPERTIES
+        OUTPUT_NAME supernodes
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/solvers
+    )
+    list(APPEND SOLVER_TARGETS supernodes_ext)
 endif()
 
 if(SOLVER_TARGETS)
@@ -279,6 +290,9 @@ if(BUILD_SOLVER_TESTS)
 
     add_executable(test_supernodes tests/test_supernodes.cpp)
     target_link_libraries(test_supernodes PRIVATE solvers_headers)
-
     add_test(NAME supernodes COMMAND test_supernodes)
+
+    add_executable(test_hipo_ldlt tests/test_hipo_ldlt.cpp)
+    target_link_libraries(test_hipo_ldlt PRIVATE solvers_headers)
+    add_test(NAME hipo_ldlt COMMAND test_hipo_ldlt)
 endif()
