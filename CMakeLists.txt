@@ -46,6 +46,7 @@ option(BUILD_PDLP "Build PDLP first-order LP solver extension" ON)
 option(BUILD_SUPERSONAL "Build supernodal LDLT extension" ON)
 option(WITH_CUDA "Enable CUDA backend for PDLP" OFF)
 option(WITH_METIS "Enable METIS graph partitioning library" OFF)
+option(WITH_BLAS "Enable BLAS-3 kernels for dense supernodal updates" ON)
 option(BUILD_SOLVER_TESTS "Build solver C++ tests" OFF)
 
 include(FetchContent)
@@ -124,6 +125,16 @@ target_include_directories(
 )
 target_link_libraries(solvers_headers INTERFACE Eigen3::Eigen)
 target_compile_features(solvers_headers INTERFACE cxx_std_20)
+
+if(WITH_BLAS)
+    find_package(BLAS)
+    if(BLAS_FOUND)
+        target_link_libraries(solvers_headers INTERFACE BLAS::BLAS)
+        target_compile_definitions(solvers_headers INTERFACE LINSYS_HAS_BLAS=1)
+    else()
+        message(WARNING "BLAS not found; using the scalar blocked supernodal kernel")
+    endif()
+endif()
 
 if(BUILD_OSPQ)
     nanobind_add_module(osqp_ext python/osqp_ext.cpp)
@@ -259,7 +270,7 @@ if(BUILD_PDLP)
 endif()
 
 if(BUILD_SUPERSONAL)
-    nanobind_add_module(supernodal_ext python/solvers/supernodal_ext.cpp)
+    nanobind_add_module(supernodal_ext python/supernodal_ext.cpp)
     target_link_libraries(supernodal_ext PRIVATE solvers_headers)
     set_target_properties(
         supernodal_ext
@@ -269,7 +280,7 @@ if(BUILD_SUPERSONAL)
     )
     list(APPEND SOLVER_TARGETS supernodal_ext)
 
-    nanobind_add_module(supernodes_ext python/solvers/supernodes_ext.cpp)
+    nanobind_add_module(supernodes_ext python/supernodes_ext.cpp)
     target_link_libraries(supernodes_ext PRIVATE solvers_headers)
     set_target_properties(
         supernodes_ext
@@ -295,4 +306,8 @@ if(BUILD_SOLVER_TESTS)
     add_executable(test_hipo_ldlt tests/test_hipo_ldlt.cpp)
     target_link_libraries(test_hipo_ldlt PRIVATE solvers_headers)
     add_test(NAME hipo_ldlt COMMAND test_hipo_ldlt)
+
+    add_executable(test_ip_solver tests/test_ip_solver.cpp src/ipm/ip_solver.cpp)
+    target_link_libraries(test_ip_solver PRIVATE solvers_headers stdexec)
+    add_test(NAME ip_solver COMMAND test_ip_solver)
 endif()

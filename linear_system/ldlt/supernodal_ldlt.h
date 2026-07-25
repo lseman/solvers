@@ -33,16 +33,16 @@
 #include <string.h>
 
 #include <algorithm>
-#include <cassert>
 #include <cmath>
 #include <cstdint>
-#include <functional>
 #include <limits>
-#include <numeric>
 #include <stdexcept>
-#include <string>
 #include <utility>
 #include <vector>
+
+#if defined(LINSYS_HAS_BLAS)
+#include <cblas.h>
+#endif
 
 // ===== AMD ordering ========================================================
 // amd.h must be in global scope: it includes <iostream> which references C
@@ -70,7 +70,6 @@ using linsys::lsolve_unit;
 using linsys::ltsolve_unit;
 using linsys::Ordering;
 using linsys::permute_gather;
-using linsys::permute_scatter;
 using linsys::SparseCSC;
 
 // Dense matrix from shared linsys::
@@ -91,6 +90,10 @@ struct SupernodalFactor {
     // Supernode metadata
     std::vector< std::pair< Int, Int > > supernode_ranges;
     std::vector< Int > etree;
+    std::vector< Int > supernode_parent;
+    std::vector< Int > supernode_post;
+    std::vector< Int > supernode_row_ptr;
+    std::vector< Int > supernode_rows;
 
     // Permutation (from analysis phase)
     std::vector< Int > perm;  // perm[old] = new
@@ -116,39 +119,19 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
     using MatrixType = SparseCSC< Scalar, Index >;
     using RealScalar = double;
 
-    SupernodalLDLT() : m_size(0), m_info(SupernodalFactor::NotInitialized) {
-        m_regularization = 1e-12;
-    }
+    SupernodalLDLT() = default;
 
-    explicit SupernodalLDLT(const MatrixType& a)
-        : m_size(0), m_info(SupernodalFactor::NotInitialized) {
-        m_regularization = 1e-12;
+    explicit SupernodalLDLT(const MatrixType& a) {
         compute(a);
     }
 
     void reset() {
         m_size = 0;
-        m_factors.n = 0;
-        m_factors.Lp.clear();
-        m_factors.Li.clear();
-        m_factors.Lx.clear();
-        m_factors.D.clear();
-        m_factors.supernode_ranges.clear();
-        m_factors.etree.clear();
-        m_factors.perm.clear();
-        m_factors.iperm.clear();
-        m_ordering.perm.clear();
-        m_ordering.iperm.clear();
-        m_ordering.n = 0;
-        m_info = SupernodalFactor::NotInitialized;
-        m_numPerturbedPivots = 0;
-        m_minAbsPivot = RealScalar(0);
+        m_factors = SupernodalFactor{};
+        m_ordering = Ordering< Index >{};
+        m_externalOrdering = Ordering< Index >{};
         m_regularization = 1e-12;
-        m_factorized = false;
         m_patternAnalyzed = false;
-        m_externalOrdering.perm.clear();
-        m_externalOrdering.iperm.clear();
-        m_externalOrdering.n = 0;
         m_useExternalOrdering = false;
     }
 
@@ -164,20 +147,9 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
         factorize(a);
     }
 
-    /// Retained for API compatibility. Dense-BLAS-on-supernodes factorization
-    /// is now always used (no simplicial fallback) — this is a no-op.
-    [[deprecated("factorizeSimplicial fallback removed; dense-BLAS supernodal "
-                "factorization is always used now")]] void
-    setSupernodalFactorization(bool /*on*/) {
-    }
-
-    bool supernodalFactorization() const {
-        return true;
-    }
-
     /// Solve Ax = b given already computed factorization.
     std::vector< Scalar > solve(const std::vector< Scalar >& b) const {
-        if (!m_factorized) {
+        if (!m_factors.factorized) {
             throw std::runtime_error("supernodal: solver is not factorized");
         }
         if (static_cast< Index >(b.size()) != m_size) {
@@ -193,10 +165,10 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
         return m_size;
     }
     Index info() const {
-        return m_info;
+        return static_cast< Index >(m_factors.info_val);
     }
     bool isFactorized() const {
-        return m_factorized;
+        return m_factors.factorized;
     }
     Index nonZerosL() const {
         return static_cast< Index >(m_factors.Li.size());
@@ -205,7 +177,7 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
         return m_factors.perturbed_pivots;
     }
     Scalar minAbsPivot() const {
-        return static_cast< Scalar >(m_minAbsPivot);
+        return static_cast< Scalar >(m_factors.min_abs_pivot);
     }
 
     void setRegularization(RealScalar eps) {
@@ -234,69 +206,144 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
     }
 
     bool isSupernodal() const {
-        return m_supernodal;
+        return std::any_of(
+            m_factors.supernode_ranges.begin(), m_factors.supernode_ranges.end(),
+            [](const auto& range) { return range.second > range.first; });
     }
 
   private:
     // ===== Dense LDLᵀ on a frontal matrix (used within supernodes) ==========
-    // Factorizes F(0:npiv, 0:fsize) in-place. D_local gets diagonal.
-    // Returns number of perturbed pivots.
+    // Factorizes F(0:npiv, 0:fsize) in-place. D_local gets the diagonal.
 
-    static Int denseLDLT(DenseMatrix< Real >& F, Int fsize, Int npiv,
-                         std::vector< double >& D_local, int& numPerturbed, double& minAbsPivot,
-                         double regularization) {
-        Int perturbed = 0;
+    static void updateTrailingBlock(DenseMatrix< Real >& F, Int first, Int panel_begin,
+                                    Int panel_end, const std::vector< double >& D_local,
+                                    std::vector< double >& scaled_panel,
+                                    std::vector< double >& product) {
+        const Int trailing_size = F.rows - first;
+        const Int panel_size = panel_end - panel_begin;
+        if (trailing_size <= 0 || panel_size <= 0)
+            return;
 
-        for (Int k = 0; k < npiv; ++k) {
-            double d = F(k, k);
+#if defined(LINSYS_HAS_BLAS)
+        scaled_panel.resize(static_cast< size_t >(trailing_size) *
+                            static_cast< size_t >(panel_size));
+        product.resize(static_cast< size_t >(trailing_size) *
+                       static_cast< size_t >(trailing_size));
 
-            // Regularize near-zero pivots with the configured flat threshold.
-            if (std::abs(d) < regularization) {
-                d = (d < 0.0 ? -regularization : regularization);
-                ++perturbed;
-            }
-            D_local[static_cast< size_t >(k)] = d;
-
-            double absd = std::abs(d);
-            if (minAbsPivot == 0.0 || absd < minAbsPivot) {
-                minAbsPivot = absd;
-            }
-
-            double dinv = 1.0 / d;
-
-            // Scale L column: F(i,k) *= dinv for i > k.
-            for (Int i = k + 1; i < fsize; ++i) {
-                F(i, k) *= dinv;
-            }
-
-            // Rank-1 update: F(j,j:fsize) -= F(k,j) * F(k,k:fsize) for j > k.
-            for (Int j = k + 1; j < fsize; ++j) {
-                double ljk = F(j, k);
-                if (ljk == 0.0)
-                    continue;
-                double dljk = ljk * d;
-                for (Int i = j; i < fsize; ++i) {
-                    F(i, j) -= F(i, k) * dljk;
-                }
+        for (Int k = 0; k < panel_size; ++k) {
+            const double d = D_local[static_cast< size_t >(panel_begin + k)];
+            for (Int i = 0; i < trailing_size; ++i) {
+                scaled_panel[static_cast< size_t >(k) * static_cast< size_t >(trailing_size) +
+                             static_cast< size_t >(i)] = F(first + i, panel_begin + k) * d;
             }
         }
 
-        numPerturbed += perturbed;
-        return perturbed;
+        cblas_dgemm(CblasColMajor, CblasNoTrans, CblasTrans, trailing_size, trailing_size,
+                    panel_size, 1.0, scaled_panel.data(), trailing_size,
+                    &F(first, panel_begin), F.rows, 0.0, product.data(), trailing_size);
+
+        for (Int j = 0; j < trailing_size; ++j) {
+            for (Int i = j; i < trailing_size; ++i) {
+                F(first + i, first + j) -=
+                    product[static_cast< size_t >(j) * static_cast< size_t >(trailing_size) +
+                            static_cast< size_t >(i)];
+            }
+        }
+#else
+        (void)scaled_panel;
+        (void)product;
+        for (Int j = first; j < F.rows; ++j) {
+            for (Int i = j; i < F.rows; ++i) {
+                double update = 0.0;
+                for (Int k = panel_begin; k < panel_end; ++k) {
+                    update += F(i, k) * D_local[static_cast< size_t >(k)] * F(j, k);
+                }
+                F(i, j) -= update;
+            }
+        }
+#endif
+    }
+
+    static void denseLDLT(DenseMatrix< Real >& F, Int fsize, Int npiv,
+                          std::vector< double >& D_local, Int& perturbed_pivots,
+                          double& min_abs_pivot, double regularization) {
+        constexpr Int block_size = 32;
+        std::vector< double > scaled_panel;
+        std::vector< double > product;
+
+        for (Int panel_begin = 0; panel_begin < npiv; panel_begin += block_size) {
+            const Int panel_end = std::min(npiv, panel_begin + block_size);
+
+            // Factor the diagonal panel and compute the rectangular L panel.
+            for (Int k = panel_begin; k < panel_end; ++k) {
+                double d = F(k, k);
+
+                if (std::abs(d) < regularization) {
+                    d = (d < 0.0 ? -regularization : regularization);
+                    ++perturbed_pivots;
+                }
+                D_local[static_cast< size_t >(k)] = d;
+
+                const double absd = std::abs(d);
+                if (min_abs_pivot == 0.0 || absd < min_abs_pivot) {
+                    min_abs_pivot = absd;
+                }
+
+                const double dinv = 1.0 / d;
+                for (Int i = k + 1; i < fsize; ++i) {
+                    F(i, k) *= dinv;
+                }
+
+                // Only update columns still inside the panel. The entire
+                // trailing block is updated by DGEMM after the panel closes.
+                for (Int j = k + 1; j < panel_end; ++j) {
+                    const double dljk = F(j, k) * d;
+                    for (Int i = j; i < fsize; ++i) {
+                        F(i, j) -= F(i, k) * dljk;
+                    }
+                }
+            }
+
+            updateTrailingBlock(F, panel_end, panel_begin, panel_end, D_local,
+                                scaled_panel, product);
+        }
     }
 
     // ===== Pattern analysis: compute ordering + supernodes ==================
 
-    void analyzePattern(const MatrixType& a) {
-        if (a.n <= 0) {
-            m_info = SupernodalFactor::NotInitialized;
-            m_patternAnalyzed = false;
-            m_factorized = false;
-            return;
-        }
+    static void validateMatrix(const MatrixType& a) {
+        if (a.n < 0)
+            throw std::invalid_argument("supernodal: matrix dimension must be nonnegative");
         if (a.Ap.size() != static_cast< size_t >(a.n) + 1)
             throw std::invalid_argument("supernodal: Ap size mismatch");
+        if (a.Ap.empty() || a.Ap.front() != Index{0})
+            throw std::invalid_argument("supernodal: Ap must start at zero");
+        if (a.Ai.size() != a.Ax.size())
+            throw std::invalid_argument("supernodal: Ai/Ax size mismatch");
 
+        for (Index col = 0; col < a.n; ++col) {
+            const Index begin = a.Ap[static_cast< size_t >(col)];
+            const Index end = a.Ap[static_cast< size_t >(col) + 1];
+            if (begin < 0 || begin > end || static_cast< size_t >(end) > a.Ai.size())
+                throw std::invalid_argument("supernodal: invalid CSC column pointers");
+            for (Index p = begin; p < end; ++p) {
+                const Index row = a.Ai[static_cast< size_t >(p)];
+                if (row < 0 || row >= a.n)
+                    throw std::invalid_argument("supernodal: row index out of range");
+            }
+        }
+        if (static_cast< size_t >(a.Ap.back()) != a.Ai.size())
+            throw std::invalid_argument("supernodal: Ap.back() must equal Ai/Ax size");
+    }
+
+    void analyzePattern(const MatrixType& a) {
+        validateMatrix(a);
+        if (a.n <= 0) {
+            m_factors.info_val = SupernodalFactor::NotInitialized;
+            m_factors.factorized = false;
+            m_patternAnalyzed = false;
+            return;
+        }
         m_size = static_cast< Index >(a.n);
 
         // Compute permutation: AMD if n > threshold, else natural.
@@ -306,8 +353,8 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
         computeSupernodes(a);
 
         m_patternAnalyzed = true;
-        m_factorized = false;
-        m_info = SupernodalFactor::Success;
+        m_factors.factorized = false;
+        m_factors.info_val = SupernodalFactor::Success;
     }
 
     // ===== Numeric factorization: always dense-BLAS-on-supernodes ==========
@@ -323,8 +370,7 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
             return;
 
         factorizeSupernodal(a);
-
-        m_factorized = (m_info == SupernodalFactor::Success);
+        m_factors.factorized = (m_factors.info_val == SupernodalFactor::Success);
     }
 
     // ===== Supernodal factorization =========================================
@@ -348,7 +394,6 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
     struct SupernodeData {
         Int lo, hi;
         Int npiv;
-        Int parent_sn;
         std::vector< Int > children;
         std::vector< Int > update_rows;
         DenseMatrix< Real > schur; // Schur complement (update/update block)
@@ -362,30 +407,20 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
         m_factors.factorized = false;
         m_factors.info_val = SupernodalFactor::Success;
 
-        // Build permutation arrays.
-        // m_factors.iperm[i] = original row that maps to permuted position i.
-        // So A_perm[i,j] = A_orig[iperm[i], iperm[j]].
-        std::vector< Int > p_inv(static_cast< size_t >(m_size));
-        const auto& iperm_idx = m_factors.iperm;
-        for (Int i = 0; i < m_size; ++i) {
-            p_inv[static_cast< size_t >(i)] = iperm_idx[static_cast< size_t >(i)];
-        }
+        // m_factors.perm[old] = new, so it maps input coordinates directly
+        // into A_perm.
+        const auto& perm_idx = m_factors.perm;
 
         // Build permuted CSC: A_perm = P * A * Pᵀ.
         // We build A_perm directly in CSC format for efficient iteration.
         std::vector< Int > permAp(static_cast< size_t >(m_size) + 1, 0);
-        std::vector< std::pair< Int, double > > perm_entries;
-        perm_entries.reserve(a.nnz());
 
         // Count entries per permuted column.
         for (Index j = 0; j < a.n; ++j) {
-            const Int pj = p_inv[static_cast< size_t >(j)];
+            const Int pj = perm_idx[static_cast< size_t >(j)];
             for (Index p = a.Ap[static_cast< size_t >(j)]; p < a.Ap[static_cast< size_t >(j) + 1];
                  ++p) {
-                const Int pi = p_inv[static_cast< size_t >(a.Ai[static_cast< size_t >(p)])];
                 permAp[static_cast< size_t >(pj) + 1]++;
-                perm_entries.emplace_back(pi,
-                                          static_cast< double >(a.Ax[static_cast< size_t >(p)]));
             }
         }
         for (Int j = 0; j < m_size; ++j) {
@@ -400,10 +435,10 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
         // above); permPos tracks the running write position within each
         // column separately, so permAp itself must not be touched here.
         for (Index j = 0; j < a.n; ++j) {
-            const Int pj = p_inv[static_cast< size_t >(j)];
+            const Int pj = perm_idx[static_cast< size_t >(j)];
             for (Index p = a.Ap[static_cast< size_t >(j)]; p < a.Ap[static_cast< size_t >(j) + 1];
                  ++p) {
-                const Int pi = p_inv[static_cast< size_t >(a.Ai[static_cast< size_t >(p)])];
+                const Int pi = perm_idx[static_cast< size_t >(a.Ai[static_cast< size_t >(p)])];
                 const double v = static_cast< double >(a.Ax[static_cast< size_t >(p)]);
                 const Int pos =
                     permAp[static_cast< size_t >(pj)] + permPos[static_cast< size_t >(pj)]++;
@@ -412,16 +447,8 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
             }
         }
 
-        // Build supernode data from m_factors.supernode_ranges.
+        // Build numeric supernode state from the compact symbolic analysis.
         const size_t ns = m_factors.supernode_ranges.size();
-        std::vector< Int > col2sn(static_cast< size_t >(m_size), -1);
-        for (size_t si = 0; si < ns; ++si) {
-            for (Int c = m_factors.supernode_ranges[static_cast< size_t >(si)].first;
-                 c <= m_factors.supernode_ranges[static_cast< size_t >(si)].second; ++c) {
-                col2sn[static_cast< size_t >(c)] = static_cast< Int >(si);
-            }
-        }
-
         std::vector< SupernodeData > snodes(ns);
         for (size_t si = 0; si < ns; ++si) {
             snodes[static_cast< size_t >(si)].lo =
@@ -431,45 +458,19 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
             snodes[static_cast< size_t >(si)].npiv =
                 m_factors.supernode_ranges[static_cast< size_t >(si)].second -
                 m_factors.supernode_ranges[static_cast< size_t >(si)].first + 1;
-            snodes[static_cast< size_t >(si)].parent_sn = -1;
-        }
-
-        // Build supernode tree: parent of [lo,hi] = supernode containing etree[hi].
-        for (size_t si = 0; si < ns; ++si) {
-            Int p_col =
-                m_factors.etree[static_cast< size_t >(snodes[static_cast< size_t >(si)].hi)];
-            if (p_col >= 0) {
-                Int p_sn = col2sn[static_cast< size_t >(p_col)];
-                if (p_sn >= 0 && p_sn != static_cast< Int >(si)) {
-                    snodes[static_cast< size_t >(si)].parent_sn = p_sn;
-                    snodes[static_cast< size_t >(p_sn)].children.push_back(static_cast< Int >(si));
-                }
-            }
-        }
-
-        // Postorder of supernode forest (children before parents).
-        std::vector< Int > postorder;
-        postorder.reserve(static_cast< Int >(ns));
-        std::vector< std::pair< Int, Int > > st;
-        for (size_t si = 0; si < ns; ++si) {
-            if (snodes[static_cast< size_t >(si)].parent_sn != -1)
-                continue;
-            st.emplace_back(static_cast< Int >(si), 0);
-            while (!st.empty()) {
-                auto& top = st.back();
-                Int& ci = top.second;
-                if (ci >=
-                    static_cast< Int >(snodes[static_cast< size_t >(top.first)].children.size())) {
-                    postorder.push_back(top.first);
-                    st.pop_back();
-                    if (!st.empty())
-                        st.back().second++;
-                } else {
-                    Int child = snodes[static_cast< size_t >(top.first)]
-                                    .children[static_cast< size_t >(ci)];
-                    st.emplace_back(child, 0);
-                }
-            }
+            const Int row_begin =
+                m_factors.supernode_row_ptr[static_cast< size_t >(si)] +
+                snodes[static_cast< size_t >(si)].npiv;
+            const Int row_end =
+                m_factors.supernode_row_ptr[static_cast< size_t >(si) + 1];
+            snodes[static_cast< size_t >(si)].update_rows.assign(
+                m_factors.supernode_rows.begin() + row_begin,
+                m_factors.supernode_rows.begin() + row_end);
+            const Int parent =
+                m_factors.supernode_parent[static_cast< size_t >(si)];
+            if (parent != Int{-1})
+                snodes[static_cast< size_t >(parent)].children.push_back(
+                    static_cast< Int >(si));
         }
 
         std::vector< Int > globalToLocal(static_cast< size_t >(m_size), -1);
@@ -481,43 +482,13 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
         std::vector< Ltrip > trips;
         trips.reserve(static_cast< size_t >(m_size) * 8u);
 
-        for (Int si : postorder) {
+        for (Int si : m_factors.supernode_post) {
             auto& sn = snodes[static_cast< size_t >(si)];
             const Int col_lo = sn.lo;
             const Int col_hi = sn.hi;
             const Int npiv = sn.npiv;
-
-            // Collect direct update rows: rows > col_hi with A entries in [col_lo, col_hi].
-            std::vector< Int > update_rows;
-            std::vector< char > seen(static_cast< size_t >(m_size), 0);
-
-            for (Int pj = col_lo; pj <= col_hi; ++pj) {
-                for (Int p = permAp[static_cast< size_t >(pj)];
-                     p < permAp[static_cast< size_t >(pj) + 1]; ++p) {
-                    Int pi = permAi[static_cast< size_t >(p)];
-                    if (pi > pj && pi > col_hi) {
-                        if (!seen[static_cast< size_t >(pi)]) {
-                            seen[static_cast< size_t >(pi)] = 1;
-                            update_rows.push_back(pi);
-                        }
-                    }
-                }
-            }
-
-            // Include children update rows.
-            for (Int child : sn.children) {
-                for (Int u : snodes[static_cast< size_t >(child)].update_rows) {
-                    if (u > col_hi && !seen[static_cast< size_t >(u)]) {
-                        seen[static_cast< size_t >(u)] = 1;
-                        update_rows.push_back(u);
-                    }
-                }
-            }
-            std::sort(update_rows.begin(), update_rows.end());
-            update_rows.erase(std::unique(update_rows.begin(), update_rows.end()),
-                              update_rows.end());
-
-            const Int nupd = static_cast< Int >(update_rows.size());
+            const auto& update_rows = sn.update_rows;
+            const Int nupd = static_cast< Int >(sn.update_rows.size());
             const Int fsize = npiv + nupd;
 
             // Build local index map: global row -> local index in frontal matrix.
@@ -571,23 +542,14 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
                 const auto& cUpdates = snodes[static_cast< size_t >(child)].update_rows;
                 const Int cn = static_cast< Int >(cUpdates.size());
 
-                // Map child update rows to local frontal indices.
-                std::vector< Int > childToFrontal(static_cast< size_t >(m_size), -1);
-                for (Int u = 0; u < cn; ++u) {
-                    Int r = cUpdates[static_cast< size_t >(u)];
-                    Int fi = globalToLocal[static_cast< size_t >(r)];
-                    if (fi >= 0)
-                        childToFrontal[static_cast< size_t >(r)] = fi;
-                }
-
                 for (Int ia = 0; ia < cn; ++ia) {
                     Int ra = cUpdates[static_cast< size_t >(ia)];
-                    Int la = childToFrontal[static_cast< size_t >(ra)];
+                    Int la = globalToLocal[static_cast< size_t >(ra)];
                     if (la < 0 || la >= fsize)
                         continue;
                     for (Int ib = 0; ib < cn; ++ib) {
                         Int rb = cUpdates[static_cast< size_t >(ib)];
-                        Int lb = childToFrontal[static_cast< size_t >(rb)];
+                        Int lb = globalToLocal[static_cast< size_t >(rb)];
                         if (lb < 0 || lb >= fsize)
                             continue;
                         F(la, lb) += childSchur(ia, ib);
@@ -627,7 +589,6 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
                     trips.emplace_back(Ltrip{gi, gk, lij});
                 }
             }
-            sn.update_rows = std::move(update_rows);
         }
 
         // Build L in compressed sparse column format.
@@ -659,9 +620,6 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
             m_factors.Lx[static_cast< size_t >(p)] = static_cast< Scalar >(trip.val);
         }
 
-        m_factors.factorized = true;
-        m_factorized = true;
-        m_info = m_factors.info_val;
     }
 
     // ===== Solve: forward + diagonal + backward + un-permute ==============
@@ -669,12 +627,10 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
     std::vector< Scalar > solveImpl(const std::vector< Scalar >& b) const {
         std::vector< Scalar > x(b.size());
 
-        // Permute: x_perm[new] = b[perm[new]] = b[old]. m_factors.perm holds
-        // perm[new] = old (see Ordering::from_perm / linsys::amd_ordering),
-        // so the forward gather must index with perm, not iperm.
-        if (!m_factors.perm.empty()) {
+        // Permute: x_perm[new] = b[iperm[new]].
+        if (!m_factors.iperm.empty()) {
             std::vector< Scalar > y(static_cast< size_t >(m_size));
-            permute_gather(m_size, m_factors.perm.data(), b.data(), y.data());
+            permute_gather(m_size, m_factors.iperm.data(), b.data(), y.data());
             x = std::move(y);
         } else {
             x = b;
@@ -693,12 +649,10 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
         ltsolve_unit(m_size, m_factors.Lp.data(), m_factors.Li.data(), m_factors.Lx.data(),
                      x.data());
 
-        // Un-permute: x_old[old] = x_perm[iperm[old]]. m_factors.iperm holds
-        // iperm[old] = new, the inverse of perm, so the backward gather must
-        // index with iperm here.
+        // Un-permute: x_old[old] = x_perm[perm[old]].
         std::vector< Scalar > result(static_cast< size_t >(m_size));
-        if (!m_factors.iperm.empty()) {
-            permute_gather(m_size, m_factors.iperm.data(), x.data(), result.data());
+        if (!m_factors.perm.empty()) {
+            permute_gather(m_size, m_factors.perm.data(), x.data(), result.data());
         } else {
             result = std::move(x);
         }
@@ -710,7 +664,13 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
 
     void computeOrdering(const MatrixType& a) {
         if (m_useExternalOrdering) {
-            m_ordering = m_externalOrdering;
+            if (m_externalOrdering.n != m_size ||
+                m_externalOrdering.perm.size() != static_cast< size_t >(m_size))
+                throw std::invalid_argument("supernodal: external ordering size mismatch");
+            m_ordering = Ordering< Index >::from_perm(m_externalOrdering.perm);
+            if (!m_externalOrdering.iperm.empty() &&
+                m_externalOrdering.iperm != m_ordering.iperm)
+                throw std::invalid_argument("supernodal: inconsistent external inverse permutation");
             m_factors.perm = m_ordering.perm;
             m_factors.iperm = m_ordering.iperm;
             return;
@@ -746,59 +706,45 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
     }
 
     void computeSupernodes(const MatrixType& a) {
-        m_supernodal = false;
-
         // Build upper-triangular CSC in permuted space for supernode detection.
-        const auto& iperm_idx = m_factors.iperm;
+        const auto& perm_idx = m_factors.perm;
         std::vector< Index > ap(static_cast< size_t >(m_size) + 1, 0);
         std::vector< Index > ai;
-        std::vector< double > ax;
         ai.reserve(static_cast< size_t >(a.nnz()));
-        ax.reserve(static_cast< size_t >(a.nnz()));
 
         // Collect structural upper-triangular entries in the permuted space.
-        std::vector< std::tuple< Index, Index, double > > triples;
-        triples.reserve(static_cast< size_t >(a.nnz()));
+        std::vector< std::pair< Index, Index > > entries;
+        entries.reserve(static_cast< size_t >(a.nnz()));
         for (Index j = 0; j < a.n; ++j) {
             for (Index p = a.Ap[static_cast< size_t >(j)]; p < a.Ap[static_cast< size_t >(j) + 1];
                  ++p) {
-                const Index i = iperm_idx[static_cast< size_t >(a.Ai[static_cast< size_t >(p)])];
-                const Index j2 = iperm_idx[static_cast< size_t >(j)];
+                const Index i = perm_idx[static_cast< size_t >(a.Ai[static_cast< size_t >(p)])];
+                const Index j2 = perm_idx[static_cast< size_t >(j)];
                 if (i < 0 || i >= m_size || j2 < 0 || j2 >= m_size)
                     continue;
 
                 const Index row = std::min(i, j2);
                 const Index col = std::max(i, j2);
-                triples.emplace_back(col, row,
-                                     static_cast< double >(a.Ax[static_cast< size_t >(p)]));
+                entries.emplace_back(col, row);
             }
         }
-        std::sort(triples.begin(), triples.end());
-        triples.erase(std::unique(triples.begin(), triples.end(),
-                                  [](const auto& a, const auto& b) {
-                                      return std::get< 0 >(a) == std::get< 0 >(b) &&
-                                             std::get< 1 >(a) == std::get< 1 >(b);
-                                  }),
-                      triples.end());
+        std::sort(entries.begin(), entries.end());
+        entries.erase(std::unique(entries.begin(), entries.end()), entries.end());
 
         // Build CSC.
         std::vector< Index > colCounts(static_cast< size_t >(m_size), 0);
-        for (auto tit = triples.begin(); tit != triples.end(); ++tit)
-            colCounts[static_cast< size_t >(std::get< 0 >(*tit))]++;
+        for (const auto& entry : entries)
+            ++colCounts[static_cast< size_t >(entry.first)];
         for (Index j = 0; j < m_size; ++j)
             ap[static_cast< size_t >(j) + 1] += colCounts[static_cast< size_t >(j)];
         for (Index j = 0; j < m_size; ++j)
             ap[static_cast< size_t >(j) + 1] += ap[static_cast< size_t >(j)];
         ai.resize(static_cast< size_t >(ap.back()));
-        ax.resize(static_cast< size_t >(ap.back()));
         std::vector< Index > curPos(static_cast< size_t >(m_size), 0);
-        for (auto tit = triples.begin(); tit != triples.end(); ++tit) {
-            const Index pj = std::get< 0 >(*tit);
-            const Index pi = std::get< 1 >(*tit);
-            const double v = std::get< 2 >(*tit);
+        for (const auto& entry : entries) {
+            const Index pj = entry.first;
             const Index pos = ap[static_cast< size_t >(pj)] + curPos[static_cast< size_t >(pj)]++;
-            ai[static_cast< size_t >(pos)] = pi;
-            ax[static_cast< size_t >(pos)] = v;
+            ai[static_cast< size_t >(pos)] = entry.second;
         }
 
         // Compute elimination tree using ancestor path-compression.
@@ -825,24 +771,30 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
         B.n = m_size;
         B.Ap = &ap;
         B.Ai = &ai;
-        B.Ax = &ax;
 
         snode::Symbolic< Index > Sn;
         Sn.n = m_size;
         Sn.etree = &parent;
 
-        auto sn = snode::identify_supernodes< Index >(B, Sn, 0, 0.0, 1.0, 128);
+        // Relaxed amalgamation: merge columns whose L-patterns differ by up to
+        // 8 rows (or 10%), not just exact (fundamental-only) matches. Bigger
+        // supernodes -> better arithmetic intensity in denseLDLT, at the cost
+        // of a few explicit zero entries in the frontal matrix (already
+        // zero-filled via F.setZero() before gather, so this is safe).
+        auto sn = snode::identify_supernodes< Index >(B, Sn, 8, 0.1, 0.9, 128);
 
         m_factors.supernode_ranges.clear();
         m_factors.supernode_ranges.reserve(sn.ranges.size());
-        bool hasMergedSupernode = false;
         for (auto rit = sn.ranges.begin(); rit != sn.ranges.end(); ++rit) {
             m_factors.supernode_ranges.emplace_back(static_cast< Int >(rit->first),
                                                     static_cast< Int >(rit->second));
-            hasMergedSupernode = hasMergedSupernode || rit->second > rit->first;
         }
         m_factors.etree.assign(parent.begin(), parent.end());
-        m_supernodal = hasMergedSupernode;
+        m_factors.supernode_parent.assign(sn.parent.begin(), sn.parent.end());
+        m_factors.supernode_post.assign(sn.supernode_post.begin(),
+                                        sn.supernode_post.end());
+        m_factors.supernode_row_ptr.assign(sn.row_ptr.begin(), sn.row_ptr.end());
+        m_factors.supernode_rows.assign(sn.rows.begin(), sn.rows.end());
     }
 
 
@@ -854,14 +806,9 @@ template < typename Scalar = Real, typename Index = Int > class SupernodalLDLT {
     Ordering< Index > m_externalOrdering;
     bool m_useExternalOrdering = false;
     bool m_patternAnalyzed = false;
-    bool m_factorized = false;
-    Index m_info = SupernodalFactor::NotInitialized;
 
-    Index m_numPerturbedPivots = 0;
-    double m_minAbsPivot = 0.0;
     double m_regularization = 1e-12;
 
-    bool m_supernodal = false;
 };
 
 } // namespace supernodal

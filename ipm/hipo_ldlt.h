@@ -165,8 +165,8 @@ class HiPOLDLT {
         buildSymbolicPattern();
 
         std::vector< HIndex > parent = computeEtree();
-        snode::SparseUpperCSC< HIndex > B{N, &m_symAp, &m_symAi, nullptr};
-        snode::Symbolic< HIndex > S{N, &parent, nullptr, nullptr};
+        snode::SparseUpperCSC< HIndex > B{N, &m_symAp, &m_symAi};
+        snode::Symbolic< HIndex > S{N, &parent};
         // relax_abs=0, relax_rel=0, tau=1: fundamental supernodes only, no
         // amalgamation (paper §4.1 mentions relaxed partitions as a possible
         // efficiency improvement; not enabled here — see ipm/README.md).

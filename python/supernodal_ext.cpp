@@ -76,10 +76,6 @@ public:
 
     void setRegularization(double eps) { solver_.setRegularization(eps); }
 
-    void setSupernodalFactorization(bool on) { solver_.setSupernodalFactorization(on); }
-
-    bool isSupernodalFactorizationEnabled() const { return solver_.supernodalFactorization(); }
-
     nb::list supernodeRanges() const {
         return supernode_ranges_list(solver_.supernodeRanges());
     }
@@ -113,7 +109,7 @@ nb::dict solveDense(const Eigen::Ref<const Eigen::MatrixXd> &matrix,
 } // namespace
 
 NB_MODULE(supernodal, m) {
-    m.doc() = "Supernodal LDLT solver (dense-BLAS on supernodes + simplicial fallback)";
+    m.doc() = "Supernodal LDLT solver with dense BLAS-3 frontal updates";
 
     nb::class_<SupernodalLDLTWrapper>(m, "SupernodalLDLT")
         .def(nb::init<>())
@@ -129,9 +125,6 @@ NB_MODULE(supernodal, m) {
         .def("info", &SupernodalLDLTWrapper::info)
         .def_prop_ro("rows", &SupernodalLDLTWrapper::rows)
         .def("set_regularization", &SupernodalLDLTWrapper::setRegularization, nb::arg("eps"))
-        .def("set_supernodal_factorization", &SupernodalLDLTWrapper::setSupernodalFactorization,
-             nb::arg("on"), "Enable/disable supernodal dense-BLAS factorization (default: off).")
-        .def("supernodal_factorization", &SupernodalLDLTWrapper::isSupernodalFactorizationEnabled)
         .def("supernode_ranges", &SupernodalLDLTWrapper::supernodeRanges,
              "Return list of (lo, hi) supernode column ranges.")
         .def("is_supernodal", &SupernodalLDLTWrapper::isSupernodal,

@@ -58,8 +58,25 @@ void ip_solver::convert_to_standard_form(const Eigen::SparseMatrix< double >& A,
         throw std::invalid_argument("Size mismatch in inputs");
     }
 
-    // Pre-calculate sizes in one pass
-    const int num_slacks = n - sense.sum();
+    // Normalize >= rows by multiplying them by -1.  After normalization every
+    // inequality is <= and receives exactly one non-negative slack.
+    int num_slacks = 0;
+    std::vector< double > row_scale(static_cast< size_t >(n), 1.0);
+    for (int i = 0; i < n; ++i) {
+        if (sense[i] == 1.0) {
+            continue;
+        }
+        if (sense[i] == 0.0) {
+            ++num_slacks;
+            continue;
+        }
+        if (sense[i] == -1.0) {
+            row_scale[static_cast< size_t >(i)] = -1.0;
+            ++num_slacks;
+            continue;
+        }
+        throw std::invalid_argument("Constraint sense must be -1 (>=), 0 (<=), or 1 (=)");
+    }
     int n_free = 0;
 
     // Use char instead of bool for better performance
@@ -82,6 +99,9 @@ void ip_solver::convert_to_standard_form(const Eigen::SparseMatrix< double >& A,
 
     // Direct assignment is faster than copying
     bs = b;
+    for (int i = 0; i < n; ++i) {
+        bs[i] *= row_scale[static_cast< size_t >(i)];
+    }
 
     // Reserve exact space for triplets based on matrix structure
     const int estimated_nnz = A.nonZeros() + n_free * (A.nonZeros() / m) + num_slacks;
@@ -97,7 +117,7 @@ void ip_solver::convert_to_standard_form(const Eigen::SparseMatrix< double >& A,
         // Process column j of the sparse matrix
         for (Eigen::SparseMatrix< double >::InnerIterator it(A, j); it; ++it) {
             const int row = it.row();
-            const double val = it.value();
+            const double val = it.value() * row_scale[static_cast< size_t >(row)];
 
             if (is_free[j]) {
                 // Free variable: split into positive and negative parts
@@ -131,7 +151,7 @@ void ip_solver::convert_to_standard_form(const Eigen::SparseMatrix< double >& A,
     // Add slack variables efficiently
     int slack_counter = 0;
     for (int i = 0; i < n; ++i) {
-        if (sense(i) == 0) {
+        if (sense(i) != 1.0) {
             triplets.emplace_back(i, m + n_free + slack_counter++, 1.0);
         }
     }
@@ -459,17 +479,21 @@ void ip_solver::run_optimization(const OptimizationData& data, const double tol)
     warm_start = false;
     n_slacks_old = n_slacks;
 
-    // Combine loops to determine finite upper bounds (hi) and record their
-    // indices and values
-    double infty = std::numeric_limits< double >::infinity();
+    // A variable with finite bounds is represented as y = x - lo, hence its
+    // standard-form upper bound is hi - lo.  One-sided upper-bounded variables
+    // are represented as y = hi - x and have no upper bound of their own.
+    const double infty = std::numeric_limits< double >::infinity();
     std::vector< int > indices;
     std::vector< double > ubv_std;
     indices.reserve(hi.size());
     ubv_std.reserve(hi.size());
     for (int i = 0; i < hi.size(); ++i) {
-        if (hi[i] != infty) {
+        if (std::isnan(lo[i]) || std::isnan(hi[i]) || lo[i] > hi[i]) {
+            throw std::invalid_argument("Invalid variable bounds");
+        }
+        if (std::isfinite(lo[i]) && std::isfinite(hi[i])) {
             indices.push_back(i);
-            ubv_std.push_back(hi[i]);
+            ubv_std.push_back(hi[i] - lo[i]);
         }
     }
     Eigen::VectorXi ubi =

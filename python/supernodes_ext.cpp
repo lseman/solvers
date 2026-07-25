@@ -38,11 +38,9 @@ std::vector<Int> compute_etree(Int n, const std::vector<Int> &ap,
 // Build upper-triangular CSC (including the diagonal) from a dense symmetric
 // matrix, keeping only entries with row <= col.
 void upper_csc_from_dense(const Eigen::Ref<const Eigen::MatrixXd> &A, Int n,
-                          std::vector<Int> &ap, std::vector<Int> &ai,
-                          std::vector<double> &ax) {
+                          std::vector<Int> &ap, std::vector<Int> &ai) {
     ap.assign(static_cast<size_t>(n) + 1, 0);
     ai.clear();
-    ax.clear();
 
     for (Int j = 0; j < n; ++j) {
         ap[static_cast<size_t>(j)] = static_cast<Int>(ai.size());
@@ -50,7 +48,6 @@ void upper_csc_from_dense(const Eigen::Ref<const Eigen::MatrixXd> &A, Int n,
             const double v = A(i, j);
             if (v != 0.0) {
                 ai.push_back(i);
-                ax.push_back(v);
             }
         }
     }
@@ -66,13 +63,12 @@ nb::dict identify_supernodes_dense(const Eigen::Ref<const Eigen::MatrixXd> &A,
     const Int n = static_cast<Int>(A.rows());
 
     std::vector<Int> ap, ai;
-    std::vector<double> ax;
-    upper_csc_from_dense(A, n, ap, ai, ax);
+    upper_csc_from_dense(A, n, ap, ai);
 
     const std::vector<Int> etree = compute_etree(n, ap, ai);
 
-    snode::SparseUpperCSC<Int> B{n, &ap, &ai, &ax};
-    snode::Symbolic<Int> S{n, &etree, nullptr, nullptr};
+    snode::SparseUpperCSC<Int> B{n, &ap, &ai};
+    snode::Symbolic<Int> S{n, &etree};
 
     const auto info = snode::identify_supernodes<Int>(B, S, relax_abs, relax_rel, tau, max_size);
 

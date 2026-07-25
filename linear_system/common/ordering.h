@@ -94,8 +94,8 @@ amd_ordering(int32_t n, const std::vector< std::pair< int32_t, int32_t > >& edge
     csr.indices = std::move(row_indices);
 
     AMDReorderingArray amd_orderer;
-    auto perm = amd_orderer.amd_order(csr, true); // symmetrize
-    return perm;
+    // AMD returns p[new] = old; Ordering's public contract is perm[old] = new.
+    return inverse_permutation(amd_orderer.amd_order(csr, true));
 }
 
 } // namespace linsys

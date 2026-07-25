@@ -48,7 +48,7 @@ general-purpose structural and solve components:
 
 | Component | Location | Paper section | Also used standalone by |
 |---|---|---|---|
-| Supernode detection | `linear_system/supernodes.h` | §4.1 (supernode partition) | `python/solvers/supernodes_ext.cpp` |
+| Supernode detection | `linear_system/supernodes.h` | §4.1 (supernode partition) | `python/supernodes_ext.cpp` |
 | AMD fill-reducing ordering | `linear_system/common/amd.h`, `common/ordering.h` | §4.2 (ordering — paper uses Metis nested dissection; we use AMD) | `linear_system/ldlt/ldlt.h`, `supernodal_ldlt.h` |
 | Sign-preserving pivot regularization | inlined in `hipo_ldlt.h::bkFactorizeFrontal` | §4.5–4.6 (static+dynamic regularization, Prop. 3 bound) | HiPO only |
 | CSC storage / triangular solves | `linear_system/common/sparse_csc.h`, `common/trisolve.h` | — (plumbing) | every solver in `linear_system/ldlt/` |
