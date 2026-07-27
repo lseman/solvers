@@ -38,12 +38,14 @@ endif()
 # Module build options
 option(BUILD_OSPQ "Build OSQP solver extension" ON)
 option(BUILD_PIQP "Build PIQP solver extension" ON)
+option(BUILD_QP "Build unified QP solver extension" ON)
 option(BUILD_QDLDL "Build QDLDL extension" ON)
 option(BUILD_LDLT "Build custom LDLT extension" ON)
 option(BUILD_KLU "Build custom KLU-style LU solver extension" ON)
 option(BUILD_IPM "Build IPM solver extension" ON)
 option(BUILD_PDLP "Build PDLP first-order LP solver extension" ON)
 option(BUILD_SUPERSONAL "Build supernodal LDLT extension" ON)
+option(BUILD_PROXQP "Build ProxQP solver extension" ON)
 option(WITH_CUDA "Enable CUDA backend for PDLP" OFF)
 option(WITH_METIS "Enable METIS graph partitioning library" OFF)
 option(WITH_BLAS "Enable BLAS-3 kernels for dense supernodal updates" ON)
@@ -160,6 +162,18 @@ if(BUILD_PIQP)
     list(APPEND SOLVER_TARGETS piqp_ext)
 endif()
 
+if(BUILD_QP)
+    nanobind_add_module(qp_ext python/qp_ext.cpp)
+    target_link_libraries(qp_ext PRIVATE solvers_headers)
+    set_target_properties(
+        qp_ext
+        PROPERTIES
+        OUTPUT_NAME qp
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    list(APPEND SOLVER_TARGETS qp_ext)
+endif()
+
 if(BUILD_QDLDL)
     nanobind_add_module(qdldl_ext python/qdldl_ext.cpp)
     target_link_libraries(qdldl_ext PRIVATE solvers_headers)
@@ -267,6 +281,18 @@ if(BUILD_PDLP)
         LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     list(APPEND SOLVER_TARGETS pdlp_ext)
+endif()
+
+if(BUILD_PROXQP)
+    nanobind_add_module(proxqp_ext python/proxqp_ext.cpp)
+    target_link_libraries(proxqp_ext PRIVATE solvers_headers)
+    set_target_properties(
+        proxqp_ext
+        PROPERTIES
+        OUTPUT_NAME proxqp
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
+    list(APPEND SOLVER_TARGETS proxqp_ext)
 endif()
 
 if(BUILD_SUPERSONAL)
