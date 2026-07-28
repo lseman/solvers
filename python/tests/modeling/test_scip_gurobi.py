@@ -185,7 +185,7 @@ class TestGurobi:
 class TestUnavailableBackendMessage:
     def test_scip_not_installed_message(self, monkeypatch):
         import obp.backends as backends_pkg
-        import obp.backends.scip_backend as scip_mod
+        import obp.backends.ots.scip_backend as scip_mod
 
         def _raise_import_error():
             raise ImportError("no pyscipopt")

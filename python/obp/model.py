@@ -538,6 +538,70 @@ class Problem:
 
         return add_min_constraint(self, z, terms, name=name)
 
+    # -- indicator / logic support ----------------------------------------------
+
+    def add_indicator_constraint(
+        self,
+        binary: Variable,
+        body: Expression,
+        sense: Literal["<=", ">=", "=="],
+        bound: float,
+        name: str = "",
+        activate_on: int = 1,
+    ) -> list[Constraint]:
+        """Enforce ``binary == activate_on  =>  (body sense bound)`` via big-M.
+
+        Parameters:
+            binary: The indicator variable (must be binary).
+            body: Left-hand side expression. Every variable it references
+                must have finite bounds (used to derive the tightest big-M).
+            sense: ``"<="``, ``">="``, or ``"=="``.
+            bound: Right-hand side scalar.
+            name: Optional name prefix.
+            activate_on: ``1`` (default) to trigger when ``binary == 1``,
+                or ``0`` to trigger when ``binary == 0``.
+
+        Returns:
+            The list of added :class:`Constraint` objects.
+
+        Note:
+            Only solvable via ``highs``, ``scip``, or ``gurobi`` (uses a
+            binary indicator).
+        """
+        from .formulations.indicator import add_indicator_constraint
+
+        return add_indicator_constraint(
+            self, binary, body, sense, bound, name=name, activate_on=activate_on
+        )
+
+    def add_abs_value(self, x: Variable, name: str = "") -> Variable:
+        """Create an auxiliary variable equal to ``|x|``. ``x`` must have
+        finite bounds.
+
+        Note:
+            Only solvable via ``highs``, ``scip``, or ``gurobi`` (uses a
+            binary indicator internally).
+        """
+        from .formulations.indicator import abs_value
+
+        return abs_value(self, x, name=name)
+
+    def add_logical_and(self, terms: list[Variable], name: str = "") -> Variable:
+        """Create a binary equal to ``AND(terms)``. ``terms`` must be binary,
+        length >= 2.
+        """
+        from .formulations.logic import logical_and
+
+        return logical_and(self, terms, name=name)
+
+    def add_logical_or(self, terms: list[Variable], name: str = "") -> Variable:
+        """Create a binary equal to ``OR(terms)``. ``terms`` must be binary,
+        length >= 2.
+        """
+        from .formulations.logic import logical_or
+
+        return logical_or(self, terms, name=name)
+
     # -- assembly ------------------------------------------------------------
 
     def assemble(
@@ -589,6 +653,20 @@ class Problem:
             f"Problem({self.name or '?'}, "
             f"vars={self.n_vars}, constraints={self.n_constraints})"
         )
+
+    # -- file export -----------------------------------------------------------
+
+    def write_lp(self, path: str) -> None:
+        """Write this problem to a CPLEX LP-format file at *path*."""
+        from .export import write_lp
+
+        write_lp(self, path)
+
+    def write_mps(self, path: str) -> None:
+        """Write this problem to a free-format MPS file at *path*."""
+        from .export import write_mps
+
+        write_mps(self, path)
 
     # -- serialization / debugging -------------------------------------------
 

@@ -19,6 +19,9 @@ class GurobiBackend:
 
     Solves: min c^T x s.t. l <= Ax <= u, variable_type in {continuous, integer, binary}
     Requires a valid Gurobi license.
+
+    Dual values (``y``) are only computed for pure LPs (no integer/binary
+    variables) — duals are undefined for MIPs and return zeros instead.
     """
 
     def __init__(self) -> None:
@@ -62,6 +65,7 @@ class GurobiBackend:
             model.setParam("Threads", int(options["threads"]))
 
         n_vars = len(c)
+        is_lp = bool(np.all(var_types == 0))
         vtype_map = {0: gp.GRB.CONTINUOUS, 1: gp.GRB.INTEGER, 2: gp.GRB.BINARY}
         gvars = model.addMVar(
             n_vars,
@@ -70,10 +74,20 @@ class GurobiBackend:
             vtype=[vtype_map[int(t)] for t in var_types],
         )
 
+        # One range constraint per row (rather than a split <=/>= MConstr
+        # pair) so each row has a single Gurobi constraint object and a
+        # single well-defined dual (Pi), matching the l <= Ax <= u sense.
+        constrs = []
         if A.shape[0] > 0:
             A_csr = A.tocsr()
-            model.addMConstr(A_csr, gvars, "<=", u)
-            model.addMConstr(A_csr, gvars, ">=", l)
+            gvar_list = list(gvars.tolist())
+            for i in range(A.shape[0]):
+                row = A_csr.getrow(i)
+                expr = gp.LinExpr(
+                    [float(v) for v in row.data],
+                    [gvar_list[j] for j in row.indices],
+                )
+                constrs.append(model.addRange(expr, float(l[i]), float(u[i])))
 
         if P is not None and P.nnz > 0:
             model.setObjective(0.5 * gvars @ P.tocsr() @ gvars + c @ gvars, gp.GRB.MINIMIZE)
@@ -99,9 +113,16 @@ class GurobiBackend:
             x = np.full(n_vars, np.nan)
             obj_val = float("nan")
 
+        # Duals are only well-defined for pure LP relaxations — Gurobi
+        # raises on .Pi access for MIP models.
+        if is_lp and status == "solved" and constrs:
+            y = np.array(model.getAttr("Pi", constrs))
+        else:
+            y = np.zeros(A.shape[0])
+
         return {
             "x": x,
-            "y": np.zeros(A.shape[0]),
+            "y": y,
             "obj_val": float(obj_val),
             "status": status,
             "residuals": {},

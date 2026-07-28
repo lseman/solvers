@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from ._common import import_local_extension
+from .._common import import_local_extension
 
 if TYPE_CHECKING:
     import numpy as np

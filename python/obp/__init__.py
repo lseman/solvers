@@ -33,6 +33,13 @@ Other features:
   ``osqp``, ``highs``, and ``ipm`` backends.
 - ``solve(pb, solver="highs", x0=[...])``: warm-start HiGHS with an initial
   primal solution (seeds the MIP incumbent via presolve).
+- ``pb.write_lp(path)`` / ``pb.write_mps(path)``: export the problem to a
+  standard LP or MPS file (via HiGHS; SOS constraints are expanded first,
+  SOC constraints are not representable and raise).
+- ``pb.add_indicator_constraint(b, body, sense, bound)``: big-M
+  ``b == 1 => (body sense bound)``. ``pb.add_abs_value(x)``: exact
+  ``z == |x|``. ``logical_and``/``logical_or``/``logical_not``: AND/OR/NOT
+  reformulations for binary variables.
 
 Solver backends:
 - ``osqp``: Sparse ADMM QP solver (first-order, large-scale)
@@ -44,6 +51,7 @@ Solver backends:
 - ``gurobi``: LP/MIP/QP solver via gurobipy (requires a Gurobi license)
 """
 
+from .export import write_lp, write_mps
 from .expression import Expression
 from .matrices import SparseMatrixBuilder, build_matrix_from_expr, build_symmetric_P
 from .model import (
@@ -74,6 +82,11 @@ from .formulations import (
     linearize_binary_product,
     piecewise_linear_1d,
     piecewise_linear_2d,
+    add_indicator_constraint,
+    abs_value,
+    logical_and,
+    logical_or,
+    logical_not,
 )
 
 # Re-export key types at the package level
@@ -103,6 +116,8 @@ __all__ = [
     "SparseMatrixBuilder",
     "build_matrix_from_expr",
     "build_symmetric_P",
+    "write_lp",
+    "write_mps",
     # MIP
     "check_mip",
     # Bilinear relaxation
@@ -113,4 +128,10 @@ __all__ = [
     # Piecewise-linear interpolation
     "piecewise_linear_1d",
     "piecewise_linear_2d",
+    # Indicator / logic
+    "add_indicator_constraint",
+    "abs_value",
+    "logical_and",
+    "logical_or",
+    "logical_not",
 ]

@@ -22,6 +22,9 @@ class SCIPBackend:
     Quadratic objectives are not supported (pyscipopt's Model.setObjective
     rejects nonlinear objectives) — use ``osqp``, ``piqp``, ``highs``, or
     ``gurobi`` for QP.
+
+    Dual values (``y``) are only computed for pure LPs (no integer/binary
+    variables) — duals are undefined for MIPs and return zeros instead.
     """
 
     def __init__(self) -> None:
@@ -64,8 +67,17 @@ class SCIPBackend:
                 "'highs', or 'gurobi' for QP problems."
             )
 
+        n_vars = len(c)
+        is_lp = bool(np.all(var_types == 0))
+
         model = self._scip.Model()
         model.hideOutput(quiet=not options.get("log_level", 0))
+        if is_lp:
+            # Duals (getDualsolLinear) are only retrievable when presolve
+            # doesn't transform/delete the original constraints.
+            model.setPresolve(self._scip.SCIP_PARAMSETTING.OFF)
+            model.setHeuristics(self._scip.SCIP_PARAMSETTING.OFF)
+            model.disablePropagation()
 
         if "time_limit" in options:
             model.setParam("limits/time", float(options["time_limit"]))
@@ -77,7 +89,6 @@ class SCIPBackend:
             import warnings
             warnings.warn("SCIP runs single-threaded; ignoring threads option")
 
-        n_vars = len(c)
         scip_vars = []
         for j in range(n_vars):
             vtype = "I" if var_types[j] == 1 else "B" if var_types[j] == 2 else "C"
@@ -86,6 +97,9 @@ class SCIPBackend:
             )
             scip_vars.append(v)
 
+        # One constraint per row (ranged where needed) so each row maps to
+        # a single dual value via getDualsolLinear.
+        constrs = []
         A_csr = A.tocsr()
         for i in range(A.shape[0]):
             row = A_csr.getrow(i)
@@ -94,14 +108,15 @@ class SCIPBackend:
             )
             lo, hi = l[i], u[i]
             if lo == hi:
-                model.addCons(expr == float(lo))
+                constrs.append(model.addCons(expr == float(lo)))
             elif np.isfinite(lo) and np.isfinite(hi):
-                model.addCons(expr >= float(lo))
-                model.addCons(expr <= float(hi))
+                constrs.append(model.addCons(float(lo) <= (expr <= float(hi))))
             elif np.isfinite(lo):
-                model.addCons(expr >= float(lo))
+                constrs.append(model.addCons(expr >= float(lo)))
             elif np.isfinite(hi):
-                model.addCons(expr <= float(hi))
+                constrs.append(model.addCons(expr <= float(hi)))
+            else:
+                constrs.append(None)
 
         obj_expr = self._scip.quicksum(float(ci) * xi for ci, xi in zip(c, scip_vars))
         model.setObjective(obj_expr, sense="minimize")
@@ -126,9 +141,19 @@ class SCIPBackend:
             x = np.full(n_vars, np.nan)
             obj_val = float("nan")
 
+        # Duals are only well-defined (and retrievable) for a pure LP
+        # solved with presolve/heuristics/propagation disabled above.
+        if is_lp and status == "solved":
+            y = np.array([
+                model.getDualsolLinear(c) if c is not None else 0.0
+                for c in constrs
+            ])
+        else:
+            y = np.zeros(A.shape[0])
+
         return {
             "x": x,
-            "y": np.zeros(A.shape[0]),
+            "y": y,
             "obj_val": float(obj_val),
             "status": status,
             "residuals": {},

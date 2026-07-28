@@ -1,12 +1,9 @@
 """backends — thin wrappers around the solver backends.
 
-Wraps:
-- osqp:  sparse ADMM QP solver (l <= Ax <= u)
-- piqp:  interior-point QP solver (Ax = b, Gx <= h)
-- ipm_solver: conic IPM (sense-based: =, >=, <=)
-- highs: MIP/LP/QP solver (HiGHS, MIT licensed)
-- scip: MIP/LP solver via pyscipopt
-- gurobi: MIP/LP/QP solver via gurobipy (requires a license)
+Grouped by kind:
+- ots (off-the-shelf): gurobi, highs, scip — general MIP/LP/QP solvers
+- qp: osqp, piqp, proxqp — dedicated QP solvers
+- ip: ipm_solver — conic interior-point (sense-based: =, >=, <=)
 
 Each backend implements ``solve(problem_data, **options) -> dict``
 with a consistent interface.
@@ -16,13 +13,13 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from .gurobi_backend import GurobiBackend
-from .highs_backend import HiGHSBackend
-from .ipm_backend import IPMBackend
-from .osqp_backend import OSQPBackend
-from .piqp_backend import PIQPBackend
-from .proxqp_backend import ProxQPBackend
-from .scip_backend import SCIPBackend
+from .ip.ipm_backend import IPMBackend
+from .ots.gurobi_backend import GurobiBackend
+from .ots.highs_backend import HiGHSBackend
+from .ots.scip_backend import SCIPBackend
+from .qp.osqp_backend import OSQPBackend
+from .qp.piqp_backend import PIQPBackend
+from .qp.proxqp_backend import ProxQPBackend
 
 
 class _BackendProtocol(Protocol):

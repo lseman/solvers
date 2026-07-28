@@ -121,24 +121,28 @@ class HiGHSBackend:
         # Set QP Hessian if provided
         if P is not None and P.nnz > 0:
             P_csc = P.tocsc()
-            hessian = self._highs.HighsHessian()
-            # HiGHS expects the lower triangular part of P in CSC format
-            # Build the Hessian from the sparse P matrix
-            rows = []
-            cols = []
-            vals = []
+            # HiGHS expects the lower triangular part of P in CSC format,
+            # assigned onto HighsHessian's raw start_/index_/value_ fields
+            # (there is no setDimensions/setValues/setHessian in this
+            # highspy build — passHessian takes the struct as-is).
+            starts = [0]
+            indices: list[int] = []
+            values: list[float] = []
             for j in range(n_vars):
                 for idx in range(P_csc.indptr[j], P_csc.indptr[j + 1]):
                     i = P_csc.indices[idx]
-                    if i <= j:  # lower triangular only
-                        rows.append(i)
-                        cols.append(j)
-                        vals.append(P_csc.data[idx])
+                    if i >= j:  # lower triangular only
+                        indices.append(i)
+                        values.append(P_csc.data[idx])
+                starts.append(len(indices))
 
-            if rows:
-                hessian.setDimensions(n_vars, n_vars)
-                hessian.setValues(len(rows), rows, cols, vals)
-                highs.setHessian(hessian)
+            hessian = self._highs.HighsHessian()
+            hessian.dim_ = n_vars
+            hessian.format_ = self._highs.HessianFormat.kTriangular
+            hessian.start_ = starts
+            hessian.index_ = indices
+            hessian.value_ = values
+            highs.passHessian(hessian)
 
         # Warm start: seed an initial primal solution, if provided.
         x0 = options.get("x0")
