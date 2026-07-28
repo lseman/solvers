@@ -19,6 +19,7 @@
 
 #pragma once
 
+#include "qp/common/problem.h"
 #include "qp/ruiz.h"
 
 #include <Eigen/Core>
@@ -1204,5 +1205,52 @@ class sparse_osqp_solver {
         return out;
     }
 };
+
+// -------- Shared-interface adapter (qp_common::QPProblem/QPResult) --------
+// osqp's native form is l <= Ax <= u; fold Ax=b in as rows with l=u=b.
+inline qp_common::QPResult solve_common(const qp_common::QPProblem& prob,
+                                        Settings settings = Settings{}) {
+    const int n = prob.n();
+    const int n_eq = prob.n_eq();
+    const int n_in = prob.n_in();
+
+    SpMat A_full(n_eq + n_in, n);
+    Vec l_full(n_eq + n_in), u_full(n_eq + n_in);
+
+    std::vector<Triplet> triplets;
+    triplets.reserve(size_t(prob.A.nonZeros()) + size_t(prob.C.nonZeros()));
+    for (int k = 0; k < prob.A.outerSize(); ++k)
+        for (SpMat::InnerIterator it(prob.A, k); it; ++it)
+            triplets.emplace_back(it.row(), it.col(), it.value());
+    for (int k = 0; k < prob.C.outerSize(); ++k)
+        for (SpMat::InnerIterator it(prob.C, k); it; ++it)
+            triplets.emplace_back(n_eq + it.row(), it.col(), it.value());
+    A_full.setFromTriplets(triplets.begin(), triplets.end());
+    A_full.makeCompressed();
+
+    l_full.head(n_eq) = prob.b;
+    u_full.head(n_eq) = prob.b;
+    l_full.tail(n_in) = prob.l;
+    u_full.tail(n_in) = prob.u;
+
+    sparse_osqp_solver solver(settings);
+    Result raw = solver.solve(prob.P, prob.q, A_full, l_full, u_full);
+
+    qp_common::QPResult out;
+    if (raw.status == "solved") out.status = qp_common::QPStatus::Solved;
+    else if (raw.status == "primal_infeasible") out.status = qp_common::QPStatus::PrimalInfeasible;
+    else if (raw.status == "dual_infeasible") out.status = qp_common::QPStatus::DualInfeasible;
+    else if (raw.status == "factorization_failed") out.status = qp_common::QPStatus::FactorizationFailed;
+    else out.status = qp_common::QPStatus::MaxIterReached;
+
+    out.iters = raw.iters;
+    out.obj_val = raw.obj_val;
+    out.x = raw.x;
+    out.y = raw.y.head(n_eq);
+    out.z = raw.y.tail(n_in);
+    out.pri_res = raw.res.pri_inf;
+    out.dua_res = raw.res.dua_inf;
+    return out;
+}
 
 }  // namespace sosqp

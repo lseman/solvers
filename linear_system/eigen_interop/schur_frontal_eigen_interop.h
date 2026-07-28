@@ -66,16 +66,38 @@ csc_to_eigen(const SparseCSC< Scalar, int32_t >& csc) {
     return A;
 }
 
-// Full frontal factorization: left-looking sparse LDL^T with AMD ordering.
-// Fills result.L (CSC, strict lower), result.diag (D), result.perm/iperm.
-inline FrontalLDLT factor_frontal(const Eigen::SparseMatrix< double, Eigen::ColMajor, int32_t >& A,
-                                  Real pivot_tolerance = 1e-14) {
+inline std::shared_ptr< const linsys::SymbolicLDLT >
+analyze_frontal(
+    const Eigen::SparseMatrix< double, Eigen::ColMajor, int32_t >& A) {
     if (A.rows() != A.cols())
         throw std::invalid_argument("Matrix must be square");
+    auto compressed = A;
+    compressed.makeCompressed();
+    return linsys::SymbolicLDLTBuilder::analyzeSimplicial(
+        eigen_to_csc(compressed));
+}
+
+// Numerical frontal factorization using a reusable common symbolic analysis.
+inline FrontalLDLT factor_frontal(
+    const Eigen::SparseMatrix< double, Eigen::ColMajor, int32_t >& A,
+    std::shared_ptr< const linsys::SymbolicLDLT > symbolic,
+    Real pivot_tolerance = 1e-14) {
+    if (A.rows() != A.cols())
+        throw std::invalid_argument("Matrix must be square");
+    if (!symbolic || symbolic->backend() !=
+                         linsys::SymbolicLDLT::Backend::Simplicial)
+        throw std::invalid_argument(
+            "schur_frontal: incompatible symbolic backend");
+    auto compressed = A;
+    compressed.makeCompressed();
+    const auto csc = eigen_to_csc(compressed);
+    if (csc.n != symbolic->size() ||
+        linsys::symmetric_pattern_hash(csc) != symbolic->patternHash())
+        throw std::invalid_argument("schur_frontal: symbolic pattern mismatch");
 
     FrontalLDLT result;
     Int n = static_cast< Int >(A.rows());
-    result.n = n;
+    result.symbolic = std::move(symbolic);
     result.pivot_tolerance = pivot_tolerance;
 
     if (n == 0) {
@@ -85,47 +107,19 @@ inline FrontalLDLT factor_frontal(const Eigen::SparseMatrix< double, Eigen::ColM
         return result;
     }
 
-    // ── AMD ordering ─────────────────────────────────────────────────────
-    std::vector< std::pair< Int, Int > > edges;
-    edges.reserve(static_cast< size_t >(A.nonZeros()));
-    for (Int j = 0; j < n; ++j) {
-        for (Eigen::SparseMatrix< double, Eigen::ColMajor, int32_t >::InnerIterator it(A, j); it;
-             ++it) {
-            Int i = static_cast< Int >(it.row());
-            if (i != j) {
-                edges.emplace_back(std::min(i, j), std::max(i, j));
-            }
-        }
-    }
-    std::sort(edges.begin(), edges.end());
-    edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
-
-    std::vector< Int > perm_vec;
-    if (n > 20) {
-        perm_vec = linsys::amd_ordering(n, edges);
-    } else {
-        perm_vec.resize(static_cast< size_t >(n));
-        std::iota(perm_vec.begin(), perm_vec.end(), Int{0});
-    }
-
-    result.perm = perm_vec; // perm[old] = new
-    result.iperm.resize(static_cast< size_t >(n), Int{-1});
-    for (Int i = 0; i < n; ++i)
-        result.iperm[static_cast< size_t >(perm_vec[static_cast< size_t >(i)])] = i;
-
     // ── Build permuted lower-triangle columns ─────────────────────────────
     // The permuted system: row_new = perm[row_old], col_new = perm[col_old].
     // We only need the lower triangle (row_new >= col_new).
-    const auto& iperm = result.iperm;
+    const auto& perm = result.symbolic->permutation();
 
     using ColEntry = std::pair< Int, Real >; // (row_new, value)
     std::vector< std::vector< ColEntry > > Acols(static_cast< size_t >(n));
 
     for (Int j = 0; j < n; ++j) {
-        Int nc = iperm[static_cast< size_t >(j)];
+        Int nc = perm[static_cast< size_t >(j)];
         for (Eigen::SparseMatrix< double, Eigen::ColMajor, int32_t >::InnerIterator it(A, j); it;
              ++it) {
-            Int nr = iperm[static_cast< size_t >(it.row())];
+            Int nr = perm[static_cast< size_t >(it.row())];
             if (nr < nc)
                 continue; // skip strict upper triangle
             Acols[static_cast< size_t >(nc)].emplace_back(nr, it.value());
@@ -260,11 +254,15 @@ inline FrontalLDLT factor_frontal(const Eigen::SparseMatrix< double, Eigen::ColM
         }
     }
 
-    result.elimination_order.resize(static_cast< size_t >(n));
-    std::iota(result.elimination_order.begin(), result.elimination_order.end(), Int{0});
-
     result.factorized = true;
     return result;
+}
+
+// Backward-compatible analyze-and-factor entry point.
+inline FrontalLDLT factor_frontal(
+    const Eigen::SparseMatrix< double, Eigen::ColMajor, int32_t >& A,
+    Real pivot_tolerance = 1e-14) {
+    return factor_frontal(A, analyze_frontal(A), pivot_tolerance);
 }
 
 } // namespace schur_frontal

@@ -15,7 +15,7 @@ def import_local_extension(module_name: str, this_file: str):
     except ImportError:
         pkg = Path(this_file).resolve().parent
         root = pkg
-        while root.name not in ("solvers", "dev"):
+        while not (root / "build").is_dir() and root.parent != root:
             root = root.parent
         build = root / "build"
         for so in build.glob(f"{module_name}.*.so"):

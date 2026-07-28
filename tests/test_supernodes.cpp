@@ -1,5 +1,6 @@
 #include "linear_system/ldlt/supernodal_ldlt.h"
 #include "linear_system/eigen_interop/supernodal_eigen_interop.h"
+#include "linear_system/eigen_interop/schur_frontal_eigen_interop.h"
 #include "linear_system/supernodes.h"
 
 #include <Eigen/Dense>
@@ -215,6 +216,16 @@ void expectInvalidArgument(const std::string &testName, Fn &&fn) {
   fail(testName, "expected std::invalid_argument");
 }
 
+template <typename Fn>
+void expectDomainError(const std::string &testName, Fn &&fn) {
+  try {
+    fn();
+  } catch (const std::domain_error &) {
+    return;
+  }
+  fail(testName, "expected std::domain_error");
+}
+
 void testInvalidInputs() {
   expectInvalidArgument("invalid etree parent", [] {
     (void)snode::postorder_etree(std::vector<int>{2, -1});
@@ -290,6 +301,8 @@ void runEigenCase(const std::string &testName, int n,
                   const Ranges &expectedRanges) {
   const SpMat A = makeBlockSpd(n, denseBlocks);
   supernodal::SupernodalLDLT<double, int> solver;
+  solver.setBackendPolicy(
+      supernodal::SupernodalLDLT<double, int>::BackendPolicy::ForceSupernodal);
   supernodal::computeEigen(solver, A);
 
   expectRanges(testName, solver.supernodeRanges(), expectedRanges);
@@ -407,6 +420,473 @@ void testRandomSparseSpdSolves() {
   }
 }
 
+void testPatternReuseContract() {
+  constexpr int n = 8;
+  Eigen::MatrixXd dense = Eigen::MatrixXd::Identity(n, n) * 5.0;
+  for (int i = 0; i + 1 < n; ++i) {
+    dense(i, i + 1) = -0.5;
+    dense(i + 1, i) = -0.5;
+  }
+  SpMat sparse = dense.sparseView(0.0, 0.0);
+
+  supernodal::SupernodalLDLT<double, int> solver;
+  solver.setBackendPolicy(
+      supernodal::SupernodalLDLT<double, int>::BackendPolicy::ForceSupernodal);
+  auto csc = supernodal::eigen_to_csc<double, int>(sparse);
+  solver.compute(csc);
+  const double *panelAddress = solver.factors().panel_values.data();
+
+  for (double &value : csc.Ax) value *= 1.25;
+  solver.refactorizeSamePattern(csc);
+  if (solver.factors().panel_values.data() != panelAddress)
+    fail("pattern reuse", "numeric panel storage was reallocated");
+
+  Eigen::MatrixXd changed = dense;
+  changed(0, 3) = changed(3, 0) = 0.2;
+  auto changedCsc =
+      supernodal::eigen_to_csc<double, int>(changed.sparseView(0.0, 0.0));
+  expectInvalidArgument("pattern mismatch", [&] {
+    solver.refactorizeSamePattern(changedCsc);
+  });
+
+  solver.factorizeMatrix(changedCsc);
+  const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(n, -1.0, 1.0);
+  const Eigen::VectorXd x = supernodal::solveEigen(solver, b);
+  const double residual = (changed * x - b).norm() /
+                          (changed.norm() * x.norm() + b.norm() +
+                           std::numeric_limits<double>::epsilon());
+  if (!std::isfinite(residual) || residual > 1e-12)
+    fail("pattern reanalysis", "solve residual too large");
+}
+
+void testUpperTriangleInput() {
+  constexpr int n = 9;
+  Eigen::MatrixXd dense = Eigen::MatrixXd::Identity(n, n) * 4.0;
+  for (int i = 0; i + 1 < n; ++i)
+    dense(i, i + 1) = dense(i + 1, i) = -0.75;
+  const Eigen::MatrixXd upperDense =
+      dense.triangularView<Eigen::Upper>().toDenseMatrix();
+  const SpMat upper = upperDense.sparseView(0.0, 0.0);
+
+  supernodal::SupernodalLDLT<double, int> solver;
+  solver.setBackendPolicy(
+      supernodal::SupernodalLDLT<double, int>::BackendPolicy::ForceSupernodal);
+  supernodal::computeEigen(solver, upper);
+  const Eigen::VectorXd b = Eigen::VectorXd::LinSpaced(n, 0.5, 2.5);
+  const Eigen::VectorXd x = supernodal::solveEigen(solver, b);
+  const double residual = (dense * x - b).norm() /
+                          (dense.norm() * x.norm() + b.norm() +
+                           std::numeric_limits<double>::epsilon());
+  if (!std::isfinite(residual) || residual > 1e-12)
+    fail("upper triangle input", "solve residual too large");
+}
+
+void testPivotPolicies() {
+  supernodal::SparseCSC<double, int> zeroDiagonal;
+  zeroDiagonal.n = 2;
+  zeroDiagonal.Ap = {0, 1, 2};
+  zeroDiagonal.Ai = {0, 1};
+  zeroDiagonal.Ax = {0.0, 0.0};
+
+  supernodal::SupernodalLDLT<double, int> signedSolver;
+  signedSolver.setBackendPolicy(
+      supernodal::SupernodalLDLT<double, int>::BackendPolicy::ForceSupernodal);
+  signedSolver.setRegularization(1e-6);
+  signedSolver.setExpectedPivotSigns({-1, 1});
+  signedSolver.compute(zeroDiagonal);
+  if (signedSolver.factors().D != std::vector<double>({-1e-6, 1e-6}) ||
+      signedSolver.perturbedPivots() != 2)
+    fail("signed regularization", "regularized pivot signs are incorrect");
+
+  supernodal::SupernodalLDLT<double, int> strictSolver;
+  strictSolver.setBackendPolicy(
+      supernodal::SupernodalLDLT<double, int>::BackendPolicy::ForceSupernodal);
+  strictSolver.setStrictPivots(true);
+  expectDomainError("strict pivots", [&] { strictSolver.compute(zeroDiagonal); });
+
+  Eigen::Matrix2d indefinite;
+  indefinite << 0.0, 1.0, 1.0, 0.0;
+  const SpMat indefiniteSparse = indefinite.sparseView(0.0, 0.0);
+  supernodal::SupernodalLDLT<double, int> pivotedSolver;
+  pivotedSolver.setPivotPolicy(
+      supernodal::SupernodalLDLT<double, int>::PivotPolicy::BunchKaufman);
+  supernodal::computeEigen(pivotedSolver, indefiniteSparse);
+  const Eigen::Vector2d rhs(2.0, -3.0);
+  const Eigen::VectorXd solution =
+      supernodal::solveEigen(pivotedSolver, rhs);
+  if ((indefinite * solution - rhs).norm() > 1e-13 ||
+      pivotedSolver.factors().positive_inertia != 1 ||
+      pivotedSolver.factors().negative_inertia != 1 ||
+      !pivotedSolver.factors().pivoted)
+    fail("Bunch-Kaufman pivoting", "2x2 pivot or inertia is incorrect");
+}
+
+void testAutomaticBackendSelection() {
+  constexpr int sparseN = 32;
+  SpMat diagonal(sparseN, sparseN);
+  diagonal.setIdentity();
+  supernodal::SupernodalLDLT<double, int> sparseSolver;
+  supernodal::computeEigen(sparseSolver, diagonal);
+  if (sparseSolver.backend() !=
+      supernodal::SymbolicLDLT::Backend::Simplicial)
+    fail("automatic backend", "diagonal matrix should select simplicial");
+
+  constexpr int denseN = 160;
+  Eigen::MatrixXd dense =
+      Eigen::MatrixXd::Constant(denseN, denseN, 0.001);
+  dense.diagonal().array() = 2.0;
+  supernodal::SupernodalLDLT<double, int> denseSolver;
+  const SpMat denseSparse = dense.sparseView(0.0, 0.0);
+  supernodal::computeEigen(denseSolver, denseSparse);
+  if (denseSolver.backend() !=
+      supernodal::SymbolicLDLT::Backend::Supernodal)
+    fail("automatic backend", "dense matrix should select supernodal");
+}
+
+void testSymmetricStorageContracts() {
+  using Solver = supernodal::SupernodalLDLT<double, int>;
+  using Storage = Solver::SymmetricStorage;
+  const Eigen::Matrix2d dense =
+      (Eigen::Matrix2d() << 4.0, 3.0, 3.0, 5.0).finished();
+  const std::vector<double> rhs{1.0, -2.0};
+
+  auto checkSolve = [&](const std::string &name,
+                        supernodal::SparseCSC<double, int> matrix,
+                        Storage storage) {
+    Solver solver;
+    solver.setBackendPolicy(Solver::BackendPolicy::ForceSupernodal);
+    solver.setSymmetricStorage(storage);
+    solver.compute(matrix);
+    const auto solution = solver.solve(rhs);
+    const Eigen::Vector2d x(solution[0], solution[1]);
+    const double residual =
+        (dense * x - Eigen::Vector2d(rhs[0], rhs[1])).norm();
+    if (!std::isfinite(residual) || residual > 1e-13)
+      fail(name, "duplicate entries were not summed correctly");
+  };
+
+  supernodal::SparseCSC<double, int> upper;
+  upper.n = 2;
+  upper.Ap = {0, 1, 4};
+  upper.Ai = {0, 0, 0, 1};
+  upper.Ax = {4.0, 1.0, 2.0, 5.0};
+  checkSolve("upper duplicate sums", upper, Storage::Upper);
+  checkSolve("auto-detected upper duplicate sums", upper, Storage::AutoDetect);
+
+  supernodal::SparseCSC<double, int> lower;
+  lower.n = 2;
+  lower.Ap = {0, 3, 4};
+  lower.Ai = {0, 1, 1, 1};
+  lower.Ax = {4.0, 1.0, 2.0, 5.0};
+  checkSolve("lower duplicate sums", lower, Storage::Lower);
+
+  supernodal::SparseCSC<double, int> full;
+  full.n = 2;
+  full.Ap = {0, 3, 6};
+  full.Ai = {0, 1, 1, 0, 0, 1};
+  full.Ax = {4.0, 1.0, 2.0, 1.5, 1.5, 5.0};
+  checkSolve("full mirrored duplicate sums", full, Storage::FullSymmetric);
+
+  Solver wrongTriangle;
+  wrongTriangle.setSymmetricStorage(Storage::Upper);
+  expectInvalidArgument("explicit triangle mismatch",
+                        [&] { wrongTriangle.compute(lower); });
+
+  full.Ax[3] = 2.5;
+  Solver inconsistentMirror;
+  inconsistentMirror.setSymmetricStorage(Storage::FullSymmetric);
+  expectInvalidArgument("inconsistent mirrored sums",
+                        [&] { inconsistentMirror.compute(full); });
+
+  full.Ap = {0, 2, 3};
+  full.Ai = {0, 1, 1};
+  full.Ax = {4.0, 3.0, 5.0};
+  Solver missingMirror;
+  missingMirror.setSymmetricStorage(Storage::FullSymmetric);
+  expectInvalidArgument("missing mirrored entry",
+                        [&] { missingMirror.compute(full); });
+}
+
+void testContributorAdjacencyAndLazyCsc() {
+  using Solver = supernodal::SupernodalLDLT<double, int>;
+  constexpr int n = 14;
+  Eigen::MatrixXd dense = Eigen::MatrixXd::Zero(n, n);
+  dense.diagonal().array() = 7.0;
+  for (int col = 0; col < n; ++col) {
+    for (int offset : {1, 3, 6}) {
+      if (col + offset < n) {
+        dense(col, col + offset) = -0.2;
+        dense(col + offset, col) = -0.2;
+      }
+    }
+  }
+
+  Solver solver;
+  solver.setBackendPolicy(Solver::BackendPolicy::ForceSupernodal);
+  solver.setRelaxationThresholds({{1, 0.0}});
+  const SpMat sparse = dense.sparseView(0.0, 0.0);
+  supernodal::computeEigen(solver, sparse);
+
+  if (solver.scalarCscMaterialized())
+    fail("lazy scalar CSC", "CSC was built during numeric factorization");
+  const auto &panels = solver.panelFactors();
+  const auto symbolic = solver.symbolic();
+  if (solver.scalarCscMaterialized())
+    fail("lazy scalar CSC", "panel access unexpectedly built scalar CSC");
+  if (solver.nonZerosL() == 0)
+    fail("lazy scalar CSC", "symbolic nonzero count was not retained");
+  if (symbolic->contributorPointers().size() !=
+          symbolic->supernodeRanges().size() + 1 ||
+      symbolic->contributorPointers().back() !=
+          static_cast<int>(symbolic->contributors().size()))
+    fail("contributor adjacency", "invalid compressed adjacency offsets");
+
+  for (size_t target = 0; target < symbolic->supernodeRanges().size(); ++target) {
+    const auto [lo, hi] = symbolic->supernodeRanges()[target];
+    for (int p = symbolic->contributorPointers()[target];
+         p < symbolic->contributorPointers()[target + 1]; ++p) {
+      const int source = symbolic->contributors()[static_cast<size_t>(p)];
+      if (source < 0 || static_cast<size_t>(source) >= target)
+        fail("contributor adjacency", "contributor is not an earlier panel");
+      bool intersects = false;
+      for (int r = symbolic->supernodeRowPointers()[static_cast<size_t>(source)];
+           r < symbolic->supernodeRowPointers()[static_cast<size_t>(source) + 1];
+           ++r) {
+        const int row = symbolic->supernodeRows()[static_cast<size_t>(r)];
+        intersects = intersects || (row >= lo && row <= hi);
+      }
+      if (!intersects)
+        fail("contributor adjacency", "listed panel does not reach target");
+    }
+  }
+  if (symbolic->contributors().empty())
+    fail("contributor adjacency", "test matrix produced no contributors");
+
+  const auto &scalar = solver.factors();
+  if (!solver.scalarCscMaterialized() ||
+      scalar.Li.size() != static_cast<size_t>(solver.nonZerosL()) ||
+      scalar.Lx.size() != scalar.Li.size())
+    fail("lazy scalar CSC", "on-demand CSC materialization is inconsistent");
+}
+
+void testMultipleRhsPanelSolve() {
+  using Solver = supernodal::SupernodalLDLT<double, int>;
+  constexpr int n = 9;
+  const SpMat sparse = makeBlockSpd(n, {{0, 4}, {5, 8}});
+  const Eigen::MatrixXd dense(sparse);
+  Solver solver;
+  solver.setBackendPolicy(Solver::BackendPolicy::ForceSupernodal);
+  solver.setExternalOrdering(linsys::Ordering<int>::identity(n));
+  supernodal::computeEigen(solver, sparse);
+
+  Eigen::MatrixXd rhs(n, 3);
+  rhs.col(0) = Eigen::VectorXd::LinSpaced(n, -1.0, 1.0);
+  rhs.col(1) = Eigen::VectorXd::LinSpaced(n, 2.0, -0.5);
+  rhs.col(2).setOnes();
+  std::vector<double> packed(rhs.data(), rhs.data() + rhs.size());
+  const auto solved = solver.solveMultiple(packed, rhs.cols());
+  const Eigen::Map<const Eigen::MatrixXd> x(solved.data(), n, rhs.cols());
+  const double residual =
+      (dense * x - rhs).norm() / std::max(1.0, rhs.norm());
+  if (!std::isfinite(residual) || residual > 1e-12)
+    fail("multiple RHS panel solve", "relative residual too large");
+
+  for (int col = 0; col < rhs.cols(); ++col) {
+    const std::vector<double> b(rhs.col(col).data(),
+                                rhs.col(col).data() + n);
+    const auto single = solver.solve(b);
+    if ((Eigen::Map<const Eigen::VectorXd>(single.data(), n) - x.col(col))
+            .norm() > 1e-13)
+      fail("multiple RHS panel solve", "batch and scalar solves disagree");
+  }
+}
+
+void testSparseIntranodalPivoting() {
+  using Solver = supernodal::SupernodalLDLT<double, int>;
+  Eigen::MatrixXd dense = Eigen::MatrixXd::Zero(6, 6);
+  dense.topLeftCorner<3, 3>() <<
+      0.0, 1.0, 0.2, 1.0, 0.0, 0.1, 0.2, 0.1, 3.0;
+  dense.bottomRightCorner<3, 3>() <<
+      4.0, 0.3, 0.1, 0.3, 5.0, 0.2, 0.1, 0.2, 6.0;
+
+  Solver solver;
+  solver.setBackendPolicy(Solver::BackendPolicy::ForceSupernodal);
+  solver.setPivotPolicy(Solver::PivotPolicy::IntranodalBunchKaufman);
+  solver.setExternalOrdering(linsys::Ordering<int>::identity(6));
+  const SpMat sparse = dense.sparseView(0.0, 0.0);
+  supernodal::computeEigen(solver, sparse);
+  const auto &f = solver.panelFactors();
+  if (!f.intranodal_pivoted || f.pivoted)
+    fail("sparse intranodal pivoting", "dense fallback was used");
+  if (solver.symbolic()->supernodeRanges().size() < 2)
+    fail("sparse intranodal pivoting", "sparse block structure was not retained");
+  if (std::find(f.pivot_blocks.begin(), f.pivot_blocks.end(), int8_t{2}) ==
+      f.pivot_blocks.end())
+    fail("sparse intranodal pivoting", "expected a 2x2 pivot block");
+  if (f.positive_inertia != 5 || f.negative_inertia != 1 ||
+      f.zero_inertia != 0)
+    fail("sparse intranodal pivoting", "inertia is incorrect");
+
+  Eigen::MatrixXd rhs(6, 2);
+  rhs << 1.0, -2.0, 0.5, 1.0, -1.5, 0.25,
+      0.75, -0.25, 2.0, 1.5, -0.5, 0.8;
+  const std::vector<double> packed(rhs.data(), rhs.data() + rhs.size());
+  const auto solved = solver.solveMultiple(packed, rhs.cols());
+  const Eigen::Map<const Eigen::MatrixXd> x(solved.data(), 6, rhs.cols());
+  const double residual =
+      (dense * x - rhs).norm() / std::max(1.0, rhs.norm());
+  if (!std::isfinite(residual) || residual > 1e-12)
+    fail("sparse intranodal pivoting", "solve residual too large");
+}
+
+void testSharedImmutableSymbolicAnalysis() {
+  using Solver = supernodal::SupernodalLDLT<double, int>;
+  constexpr int n = 8;
+  Eigen::MatrixXd first = Eigen::MatrixXd::Zero(n, n);
+  Eigen::MatrixXd second = Eigen::MatrixXd::Zero(n, n);
+  for (int col = 0; col < n; ++col) {
+    first(col, col) = 5.0;
+    second(col, col) = 7.0;
+    for (int offset : {1, 3}) {
+      if (col + offset < n) {
+        first(col, col + offset) = first(col + offset, col) = -0.2;
+        second(col, col + offset) = second(col + offset, col) = 0.15;
+      }
+    }
+  }
+  const SpMat firstSparse = first.sparseView(0.0, 0.0);
+  const SpMat secondSparse = second.sparseView(0.0, 0.0);
+  const auto firstCsc = supernodal::eigen_to_csc<double, int>(firstSparse);
+  const auto secondCsc = supernodal::eigen_to_csc<double, int>(secondSparse);
+
+  Solver analyzer;
+  analyzer.setBackendPolicy(Solver::BackendPolicy::ForceSupernodal);
+  const std::shared_ptr<const supernodal::SymbolicLDLT> symbolic =
+      analyzer.analyzeSymbolic(firstCsc);
+  if (analyzer.isFactorized())
+    fail("shared symbolic analysis", "symbolic analysis performed numeric work");
+  if (!symbolic || symbolic->size() != n ||
+      symbolic->panelValuePointers().size() !=
+          symbolic->supernodeRanges().size() + 1 ||
+      symbolic->panelStorage() == 0 || symbolic->maxFrontSize() == 0)
+    fail("shared symbolic analysis", "symbolic metadata is incomplete");
+
+  Solver factor1;
+  Solver factor2;
+  factor1.factorizeWithSymbolic(firstCsc, symbolic);
+  factor2.factorizeWithSymbolic(secondCsc, symbolic);
+  if (factor1.symbolic().get() != symbolic.get() ||
+      factor2.symbolic().get() != symbolic.get())
+    fail("shared symbolic analysis", "numeric factors copied the symbolic object");
+  if (factor1.panelFactors().panel_values.data() ==
+      factor2.panelFactors().panel_values.data())
+    fail("shared symbolic analysis", "numeric panel storage was shared");
+
+  const Eigen::VectorXd rhs = Eigen::VectorXd::LinSpaced(n, -1.0, 2.0);
+  const Eigen::VectorXd x1 = supernodal::solveEigen(factor1, rhs);
+  const Eigen::VectorXd x2 = supernodal::solveEigen(factor2, rhs);
+  if ((first * x1 - rhs).norm() / std::max(1.0, rhs.norm()) > 1e-12 ||
+      (second * x2 - rhs).norm() / std::max(1.0, rhs.norm()) > 1e-12)
+    fail("shared symbolic analysis", "shared-pattern solve residual is too large");
+
+  Eigen::MatrixXd mismatch = second;
+  mismatch(0, 4) = mismatch(4, 0) = 0.1;
+  const SpMat mismatchSparse = mismatch.sparseView(0.0, 0.0);
+  const auto mismatchCsc =
+      supernodal::eigen_to_csc<double, int>(mismatchSparse);
+  expectInvalidArgument("shared symbolic pattern mismatch", [&] {
+    Solver rejected;
+    rejected.factorizeWithSymbolic(mismatchCsc, symbolic);
+  });
+}
+
+void testCommonSymbolicAcrossLdltImplementations() {
+  constexpr int n = 25;
+  Eigen::MatrixXd first = Eigen::MatrixXd::Zero(n, n);
+  Eigen::MatrixXd second = Eigen::MatrixXd::Zero(n, n);
+  first.diagonal().array() = 5.0;
+  second.diagonal().array() = 6.0;
+  for (int col = 0; col + 1 < n; ++col) {
+    first(col, col + 1) = first(col + 1, col) = -0.2;
+    second(col, col + 1) = second(col + 1, col) = 0.1;
+  }
+  for (int col = 0; col + 5 < n; ++col) {
+    first(col, col + 5) = first(col + 5, col) = -0.05;
+    second(col, col + 5) = second(col + 5, col) = 0.04;
+  }
+  const SpMat firstSparse = first.sparseView(0.0, 0.0);
+  const SpMat secondSparse = second.sparseView(0.0, 0.0);
+  const auto firstCsc = supernodal::eigen_to_csc<double, int>(firstSparse);
+  const auto secondCsc = supernodal::eigen_to_csc<double, int>(secondSparse);
+
+  ldlt::SimplicialLDLT<double, int> analyzer;
+  const auto symbolic = analyzer.analyzeSymbolic(firstCsc);
+  if (!symbolic ||
+      symbolic->backend() != linsys::SymbolicLDLT::Backend::Simplicial)
+    fail("common symbolic LDLT", "simplicial analysis has wrong backend");
+
+  ldlt::SimplicialLDLT<double, int> simplicial;
+  simplicial.factorizeWithSymbolic(firstCsc, symbolic);
+  supernodal::SupernodalLDLT<double, int> hybrid;
+  hybrid.factorizeWithSymbolic(secondCsc, symbolic);
+  if (simplicial.symbolic().get() != symbolic.get() ||
+      hybrid.symbolic().get() != symbolic.get())
+    fail("common symbolic LDLT", "LDLT implementations did not share analysis");
+
+  const std::vector<double> rhs(static_cast<size_t>(n), 1.0);
+  const auto x1 = simplicial.solve(rhs);
+  const auto x2 = hybrid.solve(rhs);
+  const Eigen::Map<const Eigen::VectorXd> x1Eigen(x1.data(), n);
+  const Eigen::Map<const Eigen::VectorXd> x2Eigen(x2.data(), n);
+  const Eigen::VectorXd b = Eigen::VectorXd::Ones(n);
+  if ((first * x1Eigen - b).norm() / b.norm() > 1e-12 ||
+      (second * x2Eigen - b).norm() / b.norm() > 1e-12)
+    fail("common symbolic LDLT", "cross-implementation residual is too large");
+}
+
+void testSchurFrontalSharedSymbolic() {
+  constexpr int n = 25;
+  Eigen::MatrixXd first = Eigen::MatrixXd::Zero(n, n);
+  Eigen::MatrixXd second = Eigen::MatrixXd::Zero(n, n);
+  first.diagonal().array() = 4.0;
+  second.diagonal().array() = 5.0;
+  for (int col = 0; col + 1 < n; ++col) {
+    first(col, col + 1) = first(col + 1, col) = -0.15;
+    second(col, col + 1) = second(col + 1, col) = 0.12;
+  }
+  for (int col = 0; col + 4 < n; ++col) {
+    first(col, col + 4) = first(col + 4, col) = -0.04;
+    second(col, col + 4) = second(col + 4, col) = 0.03;
+  }
+  const SpMat firstSparse = first.sparseView(0.0, 0.0);
+  const SpMat secondSparse = second.sparseView(0.0, 0.0);
+  const auto symbolic = schur_frontal::analyze_frontal(firstSparse);
+  const auto factor1 =
+      schur_frontal::factor_frontal(firstSparse, symbolic);
+  const auto factor2 =
+      schur_frontal::factor_frontal(secondSparse, symbolic);
+  if (factor1.symbolic.get() != symbolic.get() ||
+      factor2.symbolic.get() != symbolic.get())
+    fail("Schur frontal shared symbolic", "analysis allocation was copied");
+
+  const std::vector<double> rhs(static_cast<size_t>(n), 1.0);
+  const auto x1 = schur_frontal::solve(factor1, rhs);
+  const auto x2 = schur_frontal::solve(factor2, rhs);
+  const Eigen::Map<const Eigen::VectorXd> x1Eigen(x1.data(), n);
+  const Eigen::Map<const Eigen::VectorXd> x2Eigen(x2.data(), n);
+  const Eigen::VectorXd b = Eigen::VectorXd::Ones(n);
+  if ((first * x1Eigen - b).norm() / b.norm() > 1e-12 ||
+      (second * x2Eigen - b).norm() / b.norm() > 1e-12)
+    fail("Schur frontal shared symbolic", "solve residual is too large");
+
+  Eigen::MatrixXd mismatch = second;
+  mismatch(0, 8) = mismatch(8, 0) = 0.02;
+  const SpMat mismatchSparse = mismatch.sparseView(0.0, 0.0);
+  expectInvalidArgument("Schur frontal symbolic mismatch", [&] {
+    (void)schur_frontal::factor_frontal(mismatchSparse, symbolic);
+  });
+}
+
 } // namespace
 
 int main() {
@@ -415,6 +895,17 @@ int main() {
   testExternalOrderingContract();
   testAmdOrderingSolve();
   testRandomSparseSpdSolves();
+  testPatternReuseContract();
+  testUpperTriangleInput();
+  testPivotPolicies();
+  testAutomaticBackendSelection();
+  testSymmetricStorageContracts();
+  testContributorAdjacencyAndLazyCsc();
+  testMultipleRhsPanelSolve();
+  testSparseIntranodalPivoting();
+  testSharedImmutableSymbolicAnalysis();
+  testCommonSymbolicAcrossLdltImplementations();
+  testSchurFrontalSharedSymbolic();
   runStandaloneCase("standalone dense block at front", 7, {{0, 2}},
                     {{0, 2}, {3, 3}, {4, 4}, {5, 5}, {6, 6}});
   runStandaloneCase("standalone dense block in middle", 7, {{2, 4}},

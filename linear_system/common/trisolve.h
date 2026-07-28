@@ -20,7 +20,7 @@
 #include <cstddef>
 #include <limits>
 
-#include "../ldlt/ldlt_simd.h"
+#include "../simd/ldlt_simd.h"
 
 namespace linsys {
 

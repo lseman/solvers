@@ -5,6 +5,7 @@ import pytest
 
 from solvers.obp.expression import Expression
 from solvers.obp.model import Variable
+from solvers.obp.parameter import Parameter
 
 
 @pytest.fixture
@@ -161,3 +162,50 @@ class TestExpressionRepr:
     def test_quadratic(self, x):
         e = Expression.from_variable(x) ** 2
         assert "x" in repr(e) and "^2" in repr(e)
+
+
+class TestParameterInExpression:
+    def test_additive_resolves_current_value(self, x):
+        p = Parameter(5.0, name="p")
+        e = Expression.from_variable(x) + p
+        assert e.resolved_constant == 5.0
+        p.value = 9.0
+        assert e.resolved_constant == 9.0  # live reference, not baked in
+
+    def test_radd(self, x):
+        p = Parameter(3.0)
+        e = p + Expression.from_variable(x)
+        assert e.resolved_constant == 3.0
+        assert e.linear_coeffs[x] == 1.0
+
+    def test_subtraction(self, x):
+        p = Parameter(4.0)
+        e = Expression.from_variable(x) - p
+        assert e.resolved_constant == -4.0
+
+    def test_negation_flips_param_coeff(self, x):
+        p = Parameter(2.0)
+        e = -(Expression.from_variable(x) + p)
+        assert e.resolved_constant == -2.0
+        assert e.linear_coeffs[x] == -1.0
+
+    def test_scalar_mul_scales_param_coeff(self, x):
+        p = Parameter(2.0)
+        e = 3 * (Expression.from_variable(x) + p)
+        assert e.resolved_constant == 6.0
+
+    def test_two_expressions_with_params_add(self, x, y):
+        p1 = Parameter(1.0)
+        p2 = Parameter(2.0)
+        e = (Expression.from_variable(x) + p1) + (Expression.from_variable(y) + p2)
+        assert e.resolved_constant == 3.0
+        p1.value = 10.0
+        assert e.resolved_constant == 12.0
+
+    def test_comparison_moves_param_into_body(self, x):
+        p = Parameter(7.0)
+        bound_expr = x <= p
+        assert bound_expr._bound == 0.0
+        assert bound_expr._body.resolved_constant == -7.0
+        p.value = 20.0
+        assert bound_expr._body.resolved_constant == -20.0

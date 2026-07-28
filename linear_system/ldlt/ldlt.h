@@ -37,8 +37,9 @@
 #include <vector>
 #include "../common/ordering.h"
 #include "../common/sparse_csc.h"
+#include "../common/symbolic_ldlt.h"
 #include "../common/trisolve.h"
-#include "ldlt_simd.h"
+#include "../simd/ldlt_simd.h"
 
 namespace ldlt {
 
@@ -93,6 +94,7 @@ template < typename Scalar = double, typename Index = int32_t > class Simplicial
         m_factors.D.clear();
         m_ordering.perm.clear();
         m_ordering.iperm.clear();
+        m_symbolic.reset();
         m_info = LDLFactors< Scalar, Index >::NotInitialized;
         m_numPerturbedPivots = 0;
         m_minAbsPivot = RealScalar(0);
@@ -108,10 +110,56 @@ template < typename Scalar = double, typename Index = int32_t > class Simplicial
         factorize(a);
     }
 
+    std::shared_ptr< const linsys::SymbolicLDLT >
+    analyzeSymbolic(const MatrixType& a) {
+        analyzePattern(a);
+        return m_symbolic;
+    }
+
     void factorizeMatrix(const MatrixType& a) {
-        if (!m_patternAnalyzed || m_size != static_cast< Index >(a.n)) {
+        if (!m_patternAnalyzed || m_size != static_cast< Index >(a.n) ||
+            !m_symbolic ||
+            linsys::symmetric_pattern_hash(a) != m_symbolic->m_pattern_hash) {
             analyzePattern(a);
         }
+        factorize(a);
+    }
+
+    void refactorizeSamePattern(const MatrixType& a) {
+        if (!m_patternAnalyzed || !m_symbolic ||
+            m_size != static_cast< Index >(a.n) ||
+            linsys::symmetric_pattern_hash(a) != m_symbolic->m_pattern_hash)
+            throw std::invalid_argument("ldlt: refactorization pattern mismatch");
+        factorize(a);
+    }
+
+    std::shared_ptr< const linsys::SymbolicLDLT > symbolic() const {
+        return m_symbolic;
+    }
+
+    void setSymbolic(std::shared_ptr< const linsys::SymbolicLDLT > symbolic) {
+        if (!symbolic || symbolic->m_n <= 0)
+            throw std::invalid_argument("ldlt: invalid symbolic analysis");
+        if (symbolic->m_backend != linsys::SymbolicLDLT::Backend::Simplicial)
+            throw std::invalid_argument("ldlt: symbolic backend is not simplicial");
+        m_symbolic = std::move(symbolic);
+        m_size = static_cast< Index >(m_symbolic->m_n);
+        m_ordering = Ordering< Index >::from_perm(
+            std::vector< Index >(m_symbolic->m_perm.begin(),
+                                 m_symbolic->m_perm.end()));
+        m_patternAnalyzed = true;
+        m_factorized = false;
+        m_factors = LDLFactors< Scalar, Index >{};
+        m_info = LDLFactors< Scalar, Index >::Success;
+    }
+
+    void factorizeWithSymbolic(
+        const MatrixType& a,
+        std::shared_ptr< const linsys::SymbolicLDLT > symbolic) {
+        if (!symbolic || a.n != static_cast< Index >(symbolic->m_n) ||
+            linsys::symmetric_pattern_hash(a) != symbolic->m_pattern_hash)
+            throw std::invalid_argument("ldlt: symbolic pattern mismatch");
+        setSymbolic(std::move(symbolic));
         factorize(a);
     }
 
@@ -175,28 +223,10 @@ template < typename Scalar = double, typename Index = int32_t > class Simplicial
             throw std::invalid_argument("ldlt: Ap size mismatch");
 
         m_size = static_cast< Index >(a.n);
-
-        // Build symmetric adjacency edges (structural pattern).
-        std::vector< std::pair< Index, Index > > edges;
-        edges.reserve(static_cast< size_t >(a.nnz()) * 2 + 1);
-        for (Index j = 0; j < a.n; ++j) {
-            for (Index p = a.Ap[static_cast< size_t >(j)]; p < a.Ap[static_cast< size_t >(j) + 1];
-                 ++p) {
-                Index i = a.Ai[static_cast< size_t >(p)];
-                Index r = std::min(i, j);
-                Index c = std::max(i, j);
-                if (r == c)
-                    continue;
-                edges.emplace_back(r, c);
-            }
-        }
-
-        // Compute permutation: AMD if n > threshold, else natural.
-        if (m_size > 20) {
-            m_ordering = Ordering< Index >::from_perm(linsys::amd_ordering(m_size, edges));
-        } else {
-            m_ordering = Ordering< Index >::identity(m_size);
-        }
+        m_symbolic = linsys::SymbolicLDLTBuilder::analyzeSimplicial(a);
+        m_ordering = Ordering< Index >::from_perm(
+            std::vector< Index >(m_symbolic->m_perm.begin(),
+                                 m_symbolic->m_perm.end()));
 
         m_patternAnalyzed = true;
         m_factorized = false;
@@ -508,6 +538,7 @@ template < typename Scalar = double, typename Index = int32_t > class Simplicial
     Index m_size = 0;
     LDLFactors< Scalar, Index > m_factors;
     Ordering< Index > m_ordering;
+    std::shared_ptr< const linsys::SymbolicLDLT > m_symbolic;
     bool m_patternAnalyzed = false;
     bool m_factorized = false;
     Index m_info = LDLFactors< Scalar, Index >::NotInitialized;

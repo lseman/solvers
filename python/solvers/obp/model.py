@@ -124,21 +124,21 @@ class Variable:
     def __eq__(self, other: object) -> Expression | bool:
         if isinstance(other, Variable):
             return self._id == other._id
-        elif isinstance(other, (int, float)):
+        elif isinstance(other, (int, float)) or hasattr(other, "value"):
             return Expression.from_variable(self) == other
         return NotImplemented
 
     def __le__(self, other: object) -> Expression | bool:
         if isinstance(other, Variable):
             return Expression.from_variable(self) <= other
-        elif isinstance(other, (int, float)):
+        elif isinstance(other, (int, float)) or hasattr(other, "value"):
             return Expression.from_variable(self) <= other
         return NotImplemented
 
     def __ge__(self, other: object) -> Expression | bool:
         if isinstance(other, Variable):
             return Expression.from_variable(self) >= other
-        elif isinstance(other, (int, float)):
+        elif isinstance(other, (int, float)) or hasattr(other, "value"):
             return Expression.from_variable(self) >= other
         return NotImplemented
 
@@ -209,6 +209,14 @@ class Constraint:
     sense: Literal["<=", ">=", "=="]
     bound: float
     name: str = ""
+
+    @property
+    def effective_bound(self) -> float:
+        """RHS with the body's constant term (and any Parameter values)
+        moved across: for ``body <= bound``, solving only the linear part
+        requires comparing against ``bound - body.resolved_constant``.
+        """
+        return self.bound - self.body.resolved_constant
 
 
 class Problem:
@@ -327,6 +335,56 @@ class Problem:
             "add_constraint expects a Constraint or a comparison expression "
             "(e.g., x[0] + x[1] <= 5)"
         )
+
+    def add_constraints(
+        self,
+        exprs,
+        sense: Literal["<=", ">=", "=="],
+        bound,
+        name: str = "",
+    ) -> list[Constraint]:
+        """Add one constraint per row of a batch of expressions.
+
+        Built for the matrix-form pattern where ``exprs`` comes from
+        ``A @ x`` on a NumPy object-array of Variables (matmul dispatches
+        through Expression arithmetic and yields one Expression per row) —
+        elementwise ``<=``/``>=``/``==`` on that result does not work
+        because NumPy coerces the comparison to booleans, so build the
+        per-row Constraint objects explicitly here instead.
+
+        Usage::
+
+            x = np.array(pb.add_variables("x", 3, lb=0), dtype=object)
+            pb.add_constraints(A @ x, "<=", b)   # one row of A per constraint
+
+        Parameters:
+            exprs: Sequence of :class:`Expression`, one per row.
+            sense: ``"<="``, ``">="``, or ``"=="``, applied to every row.
+            bound: Scalar (broadcast to all rows) or a sequence with one
+                value per row.
+            name: Optional label prefix — rows are named ``{name}_0``, etc.
+
+        Returns:
+            The list of created :class:`Constraint` objects, one per row.
+        """
+        exprs = list(exprs)
+        if hasattr(bound, "__len__") and not isinstance(bound, (str, bytes)):
+            bounds = list(bound)
+            if len(bounds) != len(exprs):
+                raise ValueError(
+                    f"add_constraints: {len(exprs)} expressions but "
+                    f"{len(bounds)} bounds"
+                )
+        else:
+            bounds = [bound] * len(exprs)
+
+        constraints: list[Constraint] = []
+        for i, (expr, b) in enumerate(zip(exprs, bounds)):
+            row_name = f"{name}_{i}" if name else ""
+            c = Constraint(expr, sense, float(b), row_name)
+            self._constraints.append(c)
+            constraints.append(c)
+        return constraints
 
     def _add_constrained(
         self,

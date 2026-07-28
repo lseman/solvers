@@ -42,7 +42,7 @@
 
 #include "../common/ordering.h"
 #include "../common/sparse_csc.h"
-#include "qdldl_simd.h"
+#include "../simd/qdldl_simd.h"
 
 namespace qdldl23 {
 

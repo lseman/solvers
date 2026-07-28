@@ -1,4 +1,5 @@
 #include "python/bindings_utils.h"
+#include "qp/common/problem.h"
 #include "qp/osqp.h"
 #include "qp/piqp.h"
 #include "qp/proxqp.h"
@@ -175,6 +176,26 @@ void parse_proxqp_settings(const nb::dict& d, proxqp::Settings& def) {
     }
 }
 
+// ── Shared problem builder ───────────────────────────────────────────────────
+// All three solvers here take the same box-form input: l <= Ax <= u (no
+// separate equality block at this API layer), routed through
+// qp_common::QPProblem so each solver's solve_common() adapter handles the
+// conversion into its own native shape.
+
+qp_common::QPProblem make_box_problem(
+    const SparseMatrix& P, const Vector& q, const SparseMatrix& A,
+    const Vector& l, const Vector& u) {
+    qp_common::QPProblem prob;
+    prob.P = P;
+    prob.q = q;
+    prob.A.resize(0, P.cols());
+    prob.b.resize(0);
+    prob.C = A;
+    prob.l = l;
+    prob.u = u;
+    return prob;
+}
+
 // ── OSQP dispatch ───────────────────────────────────────────────────────────
 
 QPResult solve_osqp(
@@ -187,20 +208,16 @@ QPResult solve_osqp(
 
     sosqp::Settings s = sosqp::Settings{};
     parse_osqp_settings(settings_dict, s);
-    sosqp::sparse_osqp_solver solver(s);
-    sosqp::Result raw = solver.solve(P, q, A, l, u);
+    qp_common::QPResult raw = sosqp::solve_common(make_box_problem(P, q, A, l, u), s);
 
     QPResult r;
-    r.status = raw.status;
+    r.status = qp_common::to_string(raw.status);
     r.obj_val = raw.obj_val;
     r.x = raw.x;
     r.y = raw.y;
     r.z = raw.z;
-    r.residuals["pri_inf"] = raw.res.pri_inf;
-    r.residuals["dua_inf"] = raw.res.dua_inf;
-    if (raw.x_polish) {
-        r.x_polish = *raw.x_polish;
-    }
+    r.residuals["pri_inf"] = raw.pri_res;
+    r.residuals["dua_inf"] = raw.dua_res;
     return r;
 }
 
@@ -216,45 +233,16 @@ QPResult solve_piqp(
 
     piqp::PIQPSettings s = piqp::PIQPSettings{};
     parse_piqp_settings(settings_dict, s);
-
-    // Convert l <= Ax <= u to PIQP form: Ax = b, Gx <= h
-    // G = [A; -A], h = [u; -l]  =>  Ax <= u, -Ax <= -l  =>  l <= Ax <= u
-
-    SparseMatrix G_sparse(A.rows() * 2, A.cols());
-    std::vector<Eigen::Triplet<double>> triplets;
-    triplets.reserve(A.nonZeros() * 2);
-    for (int j = 0; j < A.outerSize(); ++j) {
-        for (SparseMatrix::InnerIterator it(A, j); it; ++it) {
-            double val = it.value();
-            int row = it.row();
-            int col = it.col();
-            triplets.emplace_back(row, col, val);
-            triplets.emplace_back(row + A.rows(), col, -val);
-        }
-    }
-    G_sparse.setFromTriplets(triplets.begin(), triplets.end());
-
-    // l <= Ax <= u  =>  no equality, G = [A; -A], h = [u; -l]
-    Vector h = Vector(A.rows() * 2);
-    h.head(A.rows()) = u;
-    h.tail(A.rows()) = -l;
-
-    piqp::piqp_solver solver(s);
-    solver.setup(P, q, std::nullopt, std::nullopt,
-                 std::optional<SparseMatrix>(G_sparse),
-                 std::optional<Vector>(h));
-    piqp::PIQPResult raw = solver.solve();
+    qp_common::QPResult raw = piqp::solve_common(make_box_problem(P, q, A, l, u), s);
 
     QPResult r;
-    r.status = raw.status;
+    r.status = qp_common::to_string(raw.status);
     r.obj_val = raw.obj_val;
     r.x = raw.x;
     r.y = raw.y;
     r.z = raw.z;
-    r.residuals["eq_inf"] = raw.residuals.eq_inf;
-    r.residuals["ineq_inf"] = raw.residuals.ineq_inf;
-    r.residuals["stat_inf"] = raw.residuals.stat_inf;
-    r.residuals["gap"] = raw.residuals.gap;
+    r.residuals["pri_inf"] = raw.pri_res;
+    r.residuals["dua_inf"] = raw.dua_res;
     return r;
 }
 
@@ -270,32 +258,17 @@ QPResult solve_proxqp(
 
     proxqp::Settings s = proxqp::Settings{};
     parse_proxqp_settings(settings_dict, s);
-
-    // ProxQP form: min 0.5 x^T H x + g^T x,  Ax = b,  l <= Cx <= u
-    // Map OSQP l <= Ax <= u: A_eq = A, b = u, C = A, l_in = l, u_in = u
-
-    int n = P.rows();
-    int n_eq = A.rows();
-    int n_in = A.rows();
-
-    // l <= Ax <= u  =>  no equality, C = A, l_in = l, u_in = u
-    proxqp::QP qp(n, 0, A.rows(), s);
-    qp.init(P, q, std::nullopt, std::nullopt,
-            std::optional<SparseMatrix>(A),
-            std::optional<Vector>(l), std::optional<Vector>(u));
-
-    proxqp::Result raw = qp.solve();
+    qp_common::QPResult raw = proxqp::solve_common(make_box_problem(P, q, A, l, u), s);
 
     QPResult r;
-    r.status = proxqp::status_string(raw.status);
-    r.obj_val = raw.info.obj_val;
+    r.status = qp_common::to_string(raw.status);
+    r.obj_val = raw.obj_val;
     r.x = raw.x;
     r.y = raw.y;
     r.z = raw.z;
-    r.slack = raw.si;
-    r.residuals["pri_res"] = raw.info.pri_res;
-    r.residuals["dua_res"] = raw.info.dua_res;
-    r.residuals["gap"] = raw.info.gap;
+    r.slack = raw.z;
+    r.residuals["pri_res"] = raw.pri_res;
+    r.residuals["dua_res"] = raw.dua_res;
     return r;
 }
 

@@ -241,12 +241,18 @@ class SparseSolver {
 
     struct FrontalLDLTWrapper : public SolverBase {
         schur_frontal::FrontalLDLT ldlt;
+        std::shared_ptr< const linsys::SymbolicLDLT > symbolic;
         int info_code = 0;
 
         void factorizeMatrix(
             const Eigen::SparseMatrix< double, Eigen::ColMajor, int >& matrix) override {
             try {
-                ldlt = schur_frontal::factor_frontal(matrix);
+                const auto csc = schur_frontal::eigen_to_csc(matrix);
+                if (!symbolic || symbolic->size() != matrix.rows() ||
+                    symbolic->patternHash() !=
+                        linsys::symmetric_pattern_hash(csc))
+                    symbolic = schur_frontal::analyze_frontal(matrix);
+                ldlt = schur_frontal::factor_frontal(matrix, symbolic);
                 info_code = ldlt.factorized ? 0 : 1;
             } catch (...) {
                 info_code = 1;
@@ -254,7 +260,8 @@ class SparseSolver {
         }
 
         Eigen::VectorXd solve(const Eigen::VectorXd& rhs) override {
-            if (!ldlt.factorized || rhs.size() != ldlt.n)
+            if (!ldlt.factorized || !ldlt.symbolic ||
+                rhs.size() != ldlt.symbolic->size())
                 return rhs;
             std::vector< double > rhs_std(rhs.data(), rhs.data() + rhs.size());
             auto sol = schur_frontal::solve(ldlt, rhs_std);
@@ -264,6 +271,8 @@ class SparseSolver {
         void reset() override {
             ldlt.fronts.clear();
             ldlt.factorized = false;
+            ldlt.symbolic.reset();
+            symbolic.reset();
         }
 
         int info() override {

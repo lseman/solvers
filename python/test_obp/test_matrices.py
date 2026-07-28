@@ -4,7 +4,14 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
-from solvers.obp.matrices import SparseMatrixBuilder, build_matrix_from_expr, build_symmetric_P
+from solvers.obp.matrices import (
+    SparseMatrixBuilder,
+    build_matrix_from_expr,
+    build_symmetric_P,
+    split_constraints_for_piqp,
+    split_constraints_for_proxqp,
+)
+from solvers.obp.model import Problem
 
 
 class TestSparseMatrixBuilder:
@@ -134,3 +141,60 @@ class TestBuildFunctions:
         assert dense[1, 1] == 4.0
         assert dense[0, 1] == 0.0
         assert dense[1, 0] == 0.0
+
+
+class TestSplitConstraintsForPIQP:
+    def test_multi_var_row_shares_row_index(self):
+        # Regression: each constraint must produce exactly one row, with all
+        # of its coefficients on that row — not one row per coefficient.
+        pb = Problem()
+        x = pb.add_variables("x", 2, lb=0)
+        pb.add_constraint(x[0] + x[1] <= 10)
+        A_eq, b_eq, G_ineq, h_ineq = split_constraints_for_piqp(pb._constraints, 2)
+        assert A_eq is None
+        assert b_eq is None
+        assert G_ineq.shape == (1, 2)
+        np.testing.assert_allclose(G_ineq.toarray()[0], [1.0, 1.0])
+        np.testing.assert_allclose(h_ineq, [10.0])
+
+    def test_equality_only_returns_none_inequality(self):
+        pb = Problem()
+        x = pb.add_variables("x", 2, lb=0)
+        pb.add_constraint(x[0] + x[1] == 4)
+        A_eq, b_eq, G_ineq, h_ineq = split_constraints_for_piqp(pb._constraints, 2)
+        assert G_ineq is None
+        assert h_ineq is None
+        assert A_eq.shape == (1, 2)
+        np.testing.assert_allclose(b_eq, [4.0])
+
+    def test_ge_negates_row_and_bound(self):
+        pb = Problem()
+        x = pb.add_variables("x", 2, lb=0)
+        pb.add_constraint(x[0] + x[1] >= 2)
+        _, _, G_ineq, h_ineq = split_constraints_for_piqp(pb._constraints, 2)
+        np.testing.assert_allclose(G_ineq.toarray()[0], [-1.0, -1.0])
+        np.testing.assert_allclose(h_ineq, [-2.0])
+
+
+class TestSplitConstraintsForProxQP:
+    def test_multi_var_row_shares_row_index(self):
+        pb = Problem()
+        x = pb.add_variables("x", 2, lb=0)
+        pb.add_constraint(x[0] + x[1] <= 10)
+        A_eq, b_eq, C_ineq, l_ineq, u_ineq = split_constraints_for_proxqp(pb._constraints, 2)
+        assert A_eq is None
+        assert C_ineq.shape == (1, 2)
+        np.testing.assert_allclose(C_ineq.toarray()[0], [1.0, 1.0])
+        np.testing.assert_allclose(l_ineq, [-np.inf])
+        np.testing.assert_allclose(u_ineq, [10.0])
+
+    def test_equality_only_returns_none_inequality(self):
+        pb = Problem()
+        x = pb.add_variables("x", 2, lb=0)
+        pb.add_constraint(x[0] + x[1] == 4)
+        A_eq, b_eq, C_ineq, l_ineq, u_ineq = split_constraints_for_proxqp(pb._constraints, 2)
+        assert C_ineq is None
+        assert l_ineq is None
+        assert u_ineq is None
+        assert A_eq.shape == (1, 2)
+        np.testing.assert_allclose(b_eq, [4.0])

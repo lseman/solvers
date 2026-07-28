@@ -25,7 +25,7 @@ def skip_if_no_solver(solver_name: str) -> bool:
 
     pkg = Path(__file__).resolve().parent.parent / "solvers" / "obp"
     root = pkg
-    while root.name not in ("solvers", "dev"):
+    while not (root / "build").is_dir() and root.parent != root:
         root = root.parent
     build = root / "build"
 

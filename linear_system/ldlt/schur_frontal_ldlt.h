@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <unordered_map>
@@ -24,6 +25,7 @@
 
 #include "../common/dense_matrix.h"
 #include "../common/sparse_csc.h"
+#include "../common/symbolic_ldlt.h"
 #include "../common/trisolve.h"
 
 namespace schur_frontal {
@@ -57,16 +59,12 @@ struct FrontalNode {
 };
 
 struct FrontalLDLT {
-    Int n = 0;
+    std::shared_ptr< const linsys::SymbolicLDLT > symbolic;
     bool factorized = false;
     Real pivot_tolerance = 1e-14;
 
     std::vector< FrontalNode > fronts;
-    std::vector< Int > elimination_order;
     std::vector< Real > diag;
-
-    std::vector< Int > perm;  // perm[old] = new
-    std::vector< Int > iperm; // iperm[new] = old
 
     SparseCSC< Real, Int > L;
 };
@@ -153,17 +151,20 @@ inline std::vector< std::pair< Int, Int > > singleton_supernodes(Int n) {
 
 /// Solve A x = b using a factorized FrontalLDLT (P A P^T = L D L^T).
 inline std::vector< Real > solve(const FrontalLDLT& ldlt, const std::vector< Real >& b) {
-    Int n = ldlt.n;
+    if (!ldlt.symbolic)
+        throw std::runtime_error("schur_frontal::solve: missing symbolic analysis");
+    const Int n = ldlt.symbolic->size();
     if (static_cast< Int >(b.size()) != n)
         throw std::invalid_argument("schur_frontal::solve: rhs size mismatch");
 
     std::vector< Real > x(static_cast< size_t >(n));
 
     // Permute: x[new] = b[iperm[new]] = b[old]
-    if (!ldlt.iperm.empty()) {
+    const auto& iperm = ldlt.symbolic->inversePermutation();
+    if (!iperm.empty()) {
         for (Int i = 0; i < n; ++i)
             x[static_cast< size_t >(i)] =
-                b[static_cast< size_t >(ldlt.iperm[static_cast< size_t >(i)])];
+                b[static_cast< size_t >(iperm[static_cast< size_t >(i)])];
     } else {
         x = b;
     }
@@ -180,10 +181,11 @@ inline std::vector< Real > solve(const FrontalLDLT& ldlt, const std::vector< Rea
 
     // Un-permute: result[old] = x[perm[old]]
     std::vector< Real > result(static_cast< size_t >(n));
-    if (!ldlt.perm.empty()) {
+    const auto& perm = ldlt.symbolic->permutation();
+    if (!perm.empty()) {
         for (Int i = 0; i < n; ++i)
             result[static_cast< size_t >(i)] =
-                x[static_cast< size_t >(ldlt.perm[static_cast< size_t >(i)])];
+                x[static_cast< size_t >(perm[static_cast< size_t >(i)])];
     } else {
         result = std::move(x);
     }

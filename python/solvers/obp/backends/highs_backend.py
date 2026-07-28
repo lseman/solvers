@@ -48,6 +48,9 @@ class HiGHSBackend:
             u: Upper bounds on constraints.
             var_types: Array of 0 (continuous), 1 (integer), 2 (binary).
             **options: HiGHS solver options (time_limit, log_level, etc.).
+                ``x0``, if given, seeds an initial (primal) solution — for
+                MIPs this can let HiGHS validate it as an incumbent via
+                presolve and skip most of branch-and-bound.
 
         Returns:
             dict with keys: x, y, obj_val, status, iter, residuals
@@ -137,6 +140,13 @@ class HiGHSBackend:
                 hessian.setValues(len(rows), rows, cols, vals)
                 highs.setHessian(hessian)
 
+        # Warm start: seed an initial primal solution, if provided.
+        x0 = options.get("x0")
+        if x0 is not None:
+            warm = self._highs.HighsSolution()
+            warm.col_value = np.asarray(x0, dtype=np.float64).tolist()
+            highs.setSolution(warm)
+
         # Solve
         highs.run()
 
@@ -168,7 +178,7 @@ class HiGHSBackend:
 
         # Get duals (shadow prices)
         try:
-            y = sol.row_value
+            y = sol.row_dual
         except Exception:
             y = np.zeros(n_rows)
 

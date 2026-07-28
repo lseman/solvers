@@ -225,6 +225,43 @@ class TestIntVarBinVar:
             v * w
 
 
+class TestAddConstraints:
+    def test_matrix_form_row_per_constraint(self):
+        pb = Problem()
+        x = np.array(pb.add_variables("x", 3, lb=0), dtype=object)
+        A = np.array([[1.0, 1.0, 0.0], [0.0, 1.0, 1.0]])
+        b = np.array([5.0, 3.0])
+
+        cons = pb.add_constraints(A @ x, "<=", b)
+        assert len(cons) == 2
+        assert pb.n_constraints == 2
+        np.testing.assert_allclose(cons[0].body.linear_coeffs[x[0]], 1.0)
+        np.testing.assert_allclose(cons[0].body.linear_coeffs[x[1]], 1.0)
+        assert cons[0].bound == 5.0
+        assert cons[1].bound == 3.0
+        assert cons[0].sense == "<="
+
+    def test_scalar_bound_broadcasts(self):
+        pb = Problem()
+        x = np.array(pb.add_variables("x", 3, lb=0), dtype=object)
+        cons = pb.add_constraints(list(x), "<=", 4.0)
+        assert len(cons) == 3
+        assert all(c.bound == 4.0 for c in cons)
+
+    def test_bound_length_mismatch_raises(self):
+        pb = Problem()
+        x = np.array(pb.add_variables("x", 3, lb=0), dtype=object)
+        with pytest.raises(ValueError):
+            pb.add_constraints(list(x), "<=", [1.0, 2.0])
+
+    def test_name_prefix_applied_per_row(self):
+        pb = Problem()
+        x = np.array(pb.add_variables("x", 2, lb=0), dtype=object)
+        cons = pb.add_constraints(list(x), "<=", 4.0, name="cap")
+        assert cons[0].name == "cap_0"
+        assert cons[1].name == "cap_1"
+
+
 @pytest.fixture
 def x():
     return Variable(0, "x")

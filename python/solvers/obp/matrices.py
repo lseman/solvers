@@ -211,15 +211,18 @@ def build_symmetric_P(
 def build_constraints_matrix(
     constraints,
     n_vars: int,
-) -> tuple[sp.coo_matrix, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[sp.coo_matrix, np.ndarray, np.ndarray, np.ndarray, list]:
     """Build constraint matrix A and bounds from a list of Constraint objects.
 
     Returns:
-        (A_coo, l, u, sense) where:
+        (A_coo, l, u, sense, row_constraints) where:
         - A_coo: sparse constraint matrix
         - l: lower bounds on Ax
         - u: upper bounds on Ax
         - sense: sense vector for IPM (=1, >=-1, <=0)
+        - row_constraints: the Constraint object backing each row of A, in
+          row order (constraints with an all-zero body are skipped and so
+          do not appear here — row i's Constraint is row_constraints[i]).
     """
     import numpy as np
     import scipy.sparse as sp
@@ -230,6 +233,7 @@ def build_constraints_matrix(
     l_parts: list[float] = []
     u_parts: list[float] = []
     sense_parts: list[float] = []
+    row_constraints: list = []
 
     row_idx = 0
     for c in constraints:
@@ -241,8 +245,9 @@ def build_constraints_matrix(
         all_cols.extend(cols)
         all_vals.extend(vals)
         row_idx += 1
+        row_constraints.append(c)
 
-        bound = c.bound
+        bound = c.effective_bound
         if c.sense == "<=":
             l_parts.append(-np.inf)
             u_parts.append(bound)
@@ -265,7 +270,7 @@ def build_constraints_matrix(
     u = np.array(u_parts, dtype=np.float64)
     sense = np.array(sense_parts, dtype=np.float64)
 
-    return A, l, u, sense
+    return A, l, u, sense, row_constraints
 
 
 def split_constraints_for_piqp(
@@ -290,17 +295,21 @@ def split_constraints_for_piqp(
         if not rows:
             continue
 
-        for r, col, val in zip(rows, cols, vals):
-            row_idx = len(b_eq) + len(h_ineq)
-            if c.sense == "==":
+        if c.sense == "==":
+            row_idx = len(b_eq)
+            for col, val in zip(cols, vals):
                 eq_rows.append((row_idx, col, val))
-                b_eq.append(c.bound)
-            elif c.sense == "<=":
+            b_eq.append(c.effective_bound)
+        elif c.sense == "<=":
+            row_idx = len(h_ineq)
+            for col, val in zip(cols, vals):
                 ineq_rows.append((row_idx, col, val))
-                h_ineq.append(c.bound)
-            elif c.sense == ">=":
+            h_ineq.append(c.effective_bound)
+        elif c.sense == ">=":
+            row_idx = len(h_ineq)
+            for col, val in zip(cols, vals):
                 ineq_rows.append((row_idx, col, -val))
-                h_ineq.append(-c.bound)
+            h_ineq.append(-c.effective_bound)
 
     if eq_rows:
         data_eq = np.array([v for _, _, v in eq_rows])
@@ -312,7 +321,7 @@ def split_constraints_for_piqp(
         )
     else:
         A_eq = None
-        b_eq = np.array([], dtype=np.float64)
+        b_eq = None
 
     if ineq_rows:
         data_ineq = np.array([v for _, _, v in ineq_rows])
@@ -324,9 +333,11 @@ def split_constraints_for_piqp(
         )
     else:
         G_ineq = None
-        h_ineq = np.array([], dtype=np.float64)
+        h_ineq = None
 
-    return A_eq, np.array(b_eq, dtype=np.float64), G_ineq, np.array(h_ineq, dtype=np.float64)
+    b_eq_out = np.array(b_eq, dtype=np.float64) if b_eq is not None else None
+    h_ineq_out = np.array(h_ineq, dtype=np.float64) if h_ineq is not None else None
+    return A_eq, b_eq_out, G_ineq, h_ineq_out
 
 
 def split_constraints_for_proxqp(
@@ -357,19 +368,23 @@ def split_constraints_for_proxqp(
         if not rows:
             continue
 
-        for r, col, val in zip(rows, cols, vals):
-            row_idx = len(b_eq) + len(ineq_rows)
-            if c.sense == "==":
+        if c.sense == "==":
+            row_idx = len(b_eq)
+            for col, val in zip(cols, vals):
                 eq_rows.append((row_idx, col, val))
-                b_eq.append(c.bound)
-            elif c.sense == "<=":
+            b_eq.append(c.effective_bound)
+        elif c.sense == "<=":
+            row_idx = len(l_ineq)
+            for col, val in zip(cols, vals):
                 ineq_rows.append((row_idx, col, val))
-                l_ineq.append(-np.inf)
-                u_ineq.append(c.bound)
-            elif c.sense == ">=":
+            l_ineq.append(-np.inf)
+            u_ineq.append(c.effective_bound)
+        elif c.sense == ">=":
+            row_idx = len(l_ineq)
+            for col, val in zip(cols, vals):
                 ineq_rows.append((row_idx, col, val))
-                l_ineq.append(c.bound)
-                u_ineq.append(np.inf)
+            l_ineq.append(c.effective_bound)
+            u_ineq.append(np.inf)
 
     if eq_rows:
         data_eq = np.array([v for _, _, v in eq_rows])
@@ -393,7 +408,10 @@ def split_constraints_for_proxqp(
         )
     else:
         C_ineq = None
-        l_ineq = np.array([], dtype=np.float64)
-        u_ineq = np.array([], dtype=np.float64)
+        l_ineq = None
+        u_ineq = None
 
-    return A_eq, np.array(b_eq, dtype=np.float64), C_ineq, np.array(l_ineq, dtype=np.float64), np.array(u_ineq, dtype=np.float64)
+    b_eq_out = np.array(b_eq, dtype=np.float64) if A_eq is not None else None
+    l_ineq_out = np.array(l_ineq, dtype=np.float64) if l_ineq is not None else None
+    u_ineq_out = np.array(u_ineq, dtype=np.float64) if u_ineq is not None else None
+    return A_eq, b_eq_out, C_ineq, l_ineq_out, u_ineq_out

@@ -32,8 +32,9 @@ class IPMBackend:
         **options,
     ) -> dict:
         import numpy as np
+        import scipy.sparse as sp
 
-        A_dense = A.to_dense() if hasattr(A, "to_dense") else A.toarray()
+        A_csc = A.tocsc() if hasattr(A, "tocsc") else sp.csc_matrix(A)
         b_np = np.asarray(b, dtype=np.float64)
         c_np = np.asarray(c, dtype=np.float64)
         lb_np = np.asarray(lb, dtype=np.float64)
@@ -42,9 +43,9 @@ class IPMBackend:
 
         tol = options.get("tol", 1e-8)
 
-        # Use the standalone solve_ipm function for simplicity
+        # solve_ipm has a sparse CSC overload — avoid densifying A.
         result = self._ipm.solve_ipm(
-            A_dense, b_np, c_np, lb_np, ub_np, sense_np, tol
+            A_csc, b_np, c_np, lb_np, ub_np, sense_np, tol
         )
 
         return {

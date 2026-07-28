@@ -19,6 +19,8 @@
 /// Note: Assumes sparse P, A, G. Scaling must be applied by user.
 
 #pragma once
+#include "qp/common/problem.h"
+
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <algorithm>
@@ -804,5 +806,76 @@ class piqp_solver {
         return std::max(0.0, std::min(1.0, alpha));
     }
 };
+
+// -------- Shared-interface adapter (qp_common::QPProblem/QPResult) --------
+// piqp's native form is Ax = b, Gx <= h; expand l <= Cx <= u into
+// G = [C_finite_u; -C_finite_l], h = [u_finite; -l_finite], dropping
+// one-sided-infinite rows (piqp has no ±inf bound handling internally).
+inline qp_common::QPResult solve_common(const qp_common::QPProblem& prob,
+                                        PIQPSettings settings = PIQPSettings{}) {
+    const int n = prob.n();
+    const int n_in = prob.n_in();
+
+    std::vector<int> upper_rows, lower_rows;
+    upper_rows.reserve(n_in);
+    lower_rows.reserve(n_in);
+    for (int i = 0; i < n_in; ++i) {
+        if (std::isfinite(prob.u[i])) upper_rows.push_back(i);
+        if (std::isfinite(prob.l[i])) lower_rows.push_back(i);
+    }
+
+    const int m = int(upper_rows.size() + lower_rows.size());
+    SparseMatrix G(m, n);
+    Vector h(m);
+    std::vector<Eigen::Triplet<double>> triplets;
+    triplets.reserve(size_t(prob.C.nonZeros()) * 2);
+
+    // Build row -> compressed-index maps.
+    std::vector<int> upper_pos(n_in, -1), lower_pos(n_in, -1);
+    for (size_t k = 0; k < upper_rows.size(); ++k) upper_pos[upper_rows[k]] = int(k);
+    for (size_t k = 0; k < lower_rows.size(); ++k)
+        lower_pos[lower_rows[k]] = int(upper_rows.size() + k);
+
+    for (int k = 0; k < prob.C.outerSize(); ++k) {
+        for (SparseMatrix::InnerIterator it(prob.C, k); it; ++it) {
+            const int row = it.row();
+            if (upper_pos[row] >= 0) triplets.emplace_back(upper_pos[row], it.col(), it.value());
+            if (lower_pos[row] >= 0) triplets.emplace_back(lower_pos[row], it.col(), -it.value());
+        }
+    }
+    G.setFromTriplets(triplets.begin(), triplets.end());
+    G.makeCompressed();
+
+    for (size_t k = 0; k < upper_rows.size(); ++k) h[int(k)] = prob.u[upper_rows[k]];
+    for (size_t k = 0; k < lower_rows.size(); ++k)
+        h[int(upper_rows.size() + k)] = -prob.l[lower_rows[k]];
+
+    piqp_solver solver(settings);
+    std::optional<SparseMatrix> A_opt = prob.n_eq() > 0 ? std::optional<SparseMatrix>(prob.A) : std::nullopt;
+    std::optional<Vector> b_opt = prob.n_eq() > 0 ? std::optional<Vector>(prob.b) : std::nullopt;
+    std::optional<SparseMatrix> G_opt = m > 0 ? std::optional<SparseMatrix>(G) : std::nullopt;
+    std::optional<Vector> h_opt = m > 0 ? std::optional<Vector>(h) : std::nullopt;
+    solver.setup(prob.P, prob.q, A_opt, b_opt, G_opt, h_opt);
+    PIQPResult raw = solver.solve();
+
+    qp_common::QPResult out;
+    out.status = (raw.status == "solved") ? qp_common::QPStatus::Solved
+                                          : qp_common::QPStatus::MaxIterReached;
+    out.iters = raw.iterations;
+    out.obj_val = raw.obj_val;
+    out.x = raw.x;
+    out.y = raw.y;
+
+    // Recover z (n_in) from the split upper/lower multipliers: z_i = z_upper_i
+    // - z_lower_i (z_upper/z_lower share sign convention with the box form).
+    out.z = Vector::Zero(n_in);
+    for (size_t k = 0; k < upper_rows.size(); ++k) out.z[upper_rows[k]] += raw.z[int(k)];
+    for (size_t k = 0; k < lower_rows.size(); ++k)
+        out.z[lower_rows[k]] -= raw.z[int(upper_rows.size() + k)];
+
+    out.pri_res = std::max(raw.residuals.eq_inf, raw.residuals.ineq_inf);
+    out.dua_res = raw.residuals.stat_inf;
+    return out;
+}
 
 }  // namespace piqp

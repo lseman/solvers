@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     import numpy as np
 
     from .model import Variable
+    from .parameter import Parameter
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class Expression:
     _linear: dict["Variable", float] = field(default_factory=dict)
     _quadratic: list[tuple["Variable", "Variable", float]] = field(default_factory=list)
     _constant: float = 0.0
+    _param_linear: dict["Parameter", float] = field(default_factory=dict)
 
     # -- constructors --------------------------------------------------------
 
@@ -65,9 +67,23 @@ class Expression:
         linear: dict["Variable", float],
         quadratic: list[tuple["Variable", "Variable", float]],
         constant: float = 0.0,
+        param_linear: dict["Parameter", float] | None = None,
     ) -> Expression:
         """Direct construction — bypasses normalization. Use only internally."""
-        return Expression(_linear=linear, _quadratic=quadratic, _constant=constant)
+        return Expression(
+            _linear=linear,
+            _quadratic=quadratic,
+            _constant=constant,
+            _param_linear=param_linear or {},
+        )
+
+    @property
+    def resolved_constant(self) -> float:
+        """Constant term plus the current value of any Parameters."""
+        total = self._constant
+        for p, c in self._param_linear.items():
+            total += c * p.value
+        return total
 
     # -- normalization helpers -----------------------------------------------
 
@@ -104,12 +120,27 @@ class Expression:
                 self._linear,
                 self._quadratic,
                 self._constant + float(other),
+                self._param_linear,
             )
         elif isinstance(other, Expression):
+            new_param = dict(self._param_linear)
+            for p, c in other._param_linear.items():
+                new_param[p] = new_param.get(p, 0.0) + c
             return Expression._from_raw(
                 {**self._linear, **other._linear},
                 self._quadratic + other._quadratic,
                 self._constant + other._constant,
+                new_param,
+            )
+        # Handle Parameter: bare parameter, additive
+        elif hasattr(other, "value") and hasattr(other, "name") and not hasattr(other, "_index"):
+            new_param = dict(self._param_linear)
+            new_param[other] = new_param.get(other, 0.0) + 1.0
+            return Expression._from_raw(
+                self._linear,
+                self._quadratic,
+                self._constant,
+                new_param,
             )
         # Handle Variable: extract from expression
         elif hasattr(other, "_index") and hasattr(other, "name"):
@@ -120,6 +151,7 @@ class Expression:
                 new_linear,
                 self._quadratic,
                 self._constant,
+                self._param_linear,
             )
         return NotImplemented
 
@@ -136,6 +168,7 @@ class Expression:
                 self._linear,
                 self._quadratic,
                 self._constant - float(other),
+                self._param_linear,
             )
         if isinstance(other, Expression):
             # Both are Expressions: subtract linear, quadratic, constant directly
@@ -147,10 +180,23 @@ class Expression:
             # Remove near-zero coefficients
             new_linear = {v: c for v, c in new_linear.items() if abs(c) > 1e-15}
             neg_quad = [(vi, vj, -c) for vi, vj, c in other._quadratic]
+            new_param = dict(self._param_linear)
+            for p, c in other._param_linear.items():
+                new_param[p] = new_param.get(p, 0.0) - c
             return Expression._from_raw(
                 new_linear,
                 self._quadratic + neg_quad,
                 self._constant - other._constant,
+                new_param,
+            )
+        elif hasattr(other, "value") and hasattr(other, "name") and not hasattr(other, "_index"):
+            new_param = dict(self._param_linear)
+            new_param[other] = new_param.get(other, 0.0) - 1.0
+            return Expression._from_raw(
+                self._linear,
+                self._quadratic,
+                self._constant,
+                new_param,
             )
         elif hasattr(other, "_index") and hasattr(other, "name"):
             v = other
@@ -161,6 +207,7 @@ class Expression:
                 new_linear,
                 self._quadratic,
                 self._constant,
+                self._param_linear,
             )
         return NotImplemented
 
@@ -176,6 +223,7 @@ class Expression:
                 {v: c * scale for v, c in self._linear.items()},
                 [(vi, vj, c * scale) for vi, vj, c in self._quadratic],
                 self._constant * scale,
+                {p: c * scale for p, c in self._param_linear.items()},
             )
         return NotImplemented
 
@@ -189,6 +237,7 @@ class Expression:
             {v: -c for v, c in self._linear.items()},
             [(vi, vj, -c) for vi, vj, c in self._quadratic],
             -self._constant,
+            {p: -c for p, c in self._param_linear.items()},
         )
 
     def __pow__(self, power: int) -> Expression:
@@ -305,10 +354,21 @@ class Expression:
         return f"Expression({', '.join(parts)})"
 
 
-# Monkey-patch Expression to support comparison operators (<=, >=, ==)
-Expression.__le__ = lambda self, other: (_BoundExpression(self, "<=", float(other))
-                                          if isinstance(other, (int, float)) else NotImplemented)
-Expression.__ge__ = lambda self, other: (_BoundExpression(self, ">=", float(other))
-                                          if isinstance(other, (int, float)) else NotImplemented)
-Expression.__eq__ = lambda self, other: (_BoundExpression(self, "==", float(other))
-                                          if isinstance(other, (int, float)) else NotImplemented)
+def _is_parameter(obj: object) -> bool:
+    return hasattr(obj, "value") and hasattr(obj, "name") and not hasattr(obj, "_index")
+
+
+# Monkey-patch Expression to support comparison operators (<=, >=, ==).
+# A Parameter on the RHS is moved into the body (self - param <= 0) so its
+# value is resolved lazily via Constraint.effective_bound, not baked in here.
+def _cmp(self: Expression, other: object, sense: str) -> _BoundExpression | type(NotImplemented):
+    if isinstance(other, (int, float)):
+        return _BoundExpression(self, sense, float(other))
+    if _is_parameter(other):
+        return _BoundExpression(self - other, sense, 0.0)
+    return NotImplemented
+
+
+Expression.__le__ = lambda self, other: _cmp(self, other, "<=")
+Expression.__ge__ = lambda self, other: _cmp(self, other, ">=")
+Expression.__eq__ = lambda self, other: _cmp(self, other, "==")

@@ -32,41 +32,25 @@ class OSQPBackend:
     ) -> dict:
         import numpy as np
 
-        P_csc = P.tocsc()
-        A_csc = A.tocsc()
+        # The compiled extension takes dense ndarrays.
+        P_dense = np.asarray(P.toarray() if hasattr(P, "toarray") else P, dtype=np.float64)
+        A_dense = np.asarray(A.toarray() if hasattr(A, "toarray") else A, dtype=np.float64)
         q_np = np.asarray(q, dtype=np.float64)
         l_np = np.asarray(l, dtype=np.float64)
         u_np = np.asarray(u, dtype=np.float64)
 
-        # Build OSQP settings
-        settings = self._osqp.settings()
+        settings = self._osqp.Settings()
         for k, v in options.items():
             if hasattr(settings, k):
                 setattr(settings, k, v)
 
-        # Setup and solve
-        prob = self._osqp.Problem(P_csc, q_np, A_csc, l_np, u_np)
-        prob.setup(verbose=False, **{k: v for k, v in options.items()
-                                     if k not in ("eps_abs", "eps_rel",
-                                                   "eps_pinf", "eps_dinf",
-                                                   "max_iter", "rho",
-                                                   "adaptive_rho")})
-        # Pass tolerance options separately
-        for key in ("eps_abs", "eps_rel", "eps_pinf", "eps_dinf", "max_iter"):
-            if key in options:
-                prob.settings()[key] = options[key]
-
-        result = prob.solve()
+        result = self._osqp.solve(P_dense, q_np, A_dense, l_np, u_np, settings)
 
         return {
-            "x": result.x,
-            "y": result.y,
-            "obj_val": result.info.obj_val,
-            "status": result.info.status,
-            "status_val": result.info.statusVal,
-            "iter": result.info.iter,
-            "residuals": {
-                "pri_inf": result.info.pri_res,
-                "dua_inf": result.info.dua_res,
-            },
+            "x": np.asarray(result["x"]),
+            "y": np.asarray(result["y"]),
+            "obj_val": result["obj_val"],
+            "status": result["status"],
+            "iter": result.get("iters", 0),
+            "residuals": result.get("residuals", {}),
         }

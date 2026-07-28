@@ -17,12 +17,17 @@ import numpy as np
 import scipy.sparse as sp
 
 from .expression import Expression
-from .matrices import build_symmetric_P, build_constraints_matrix, split_constraints_for_piqp
+from .matrices import (
+    build_symmetric_P,
+    build_constraints_matrix,
+    split_constraints_for_piqp,
+    split_constraints_for_proxqp,
+)
 from .backends import get_backend, available_solvers
 from .sos.expand import expand_sos_constraints
 
 if TYPE_CHECKING:
-    from .model import Problem, Variable
+    from .model import Constraint, Problem, Variable
 
 
 @dataclass
@@ -48,11 +53,30 @@ class Solution:
     y: np.ndarray | None = None
     slack: np.ndarray | None = None
     residuals: dict[str, float] = field(default_factory=dict)
+    _dual_map: dict[int, float] = field(default_factory=dict, repr=False)
 
     @property
     def success(self) -> bool:
         """True if the solver reports a successful termination."""
         return self.status in ("solved", "optimal", "OPT")
+
+    def dual(self, constraint: "Constraint") -> float:
+        """Return the dual value (shadow price) for a specific constraint.
+
+        Only populated for the ``osqp``, ``highs``, and ``ipm`` solvers,
+        where each constraint maps to exactly one row of the dual vector.
+        Raises KeyError if the constraint has no recorded dual (e.g. it was
+        solved with ``piqp``/``proxqp``/``scip``/``gurobi``, or its body
+        evaluated to an all-zero row and was skipped during assembly).
+        """
+        key = id(constraint)
+        if key not in self._dual_map:
+            raise KeyError(
+                "No dual value recorded for this constraint — dual() is only "
+                "populated for solver='osqp'/'highs'/'ipm', or the constraint's "
+                "body was all-zero and skipped during assembly."
+            )
+        return self._dual_map[key]
 
     def __repr__(self) -> str:
         return (
@@ -187,6 +211,10 @@ def solve(
     if sense == "maximize":
         obj = obj * (-1)
 
+    # Backends only see the linear/quadratic parts; the constant offset
+    # (including any Parameter values) is added back into obj_val here.
+    obj_offset = obj.resolved_constant
+
     # Extract variable bounds and types
     lb = np.array([v.lb for v in variables], dtype=np.float64)
     ub = np.array([v.ub for v in variables], dtype=np.float64)
@@ -212,7 +240,7 @@ def solve(
         P = build_symmetric_P(*obj.to_quadratic_arrays(n_vars), n_vars)
 
     # Extract constraint matrix
-    A_constr, l, u, sense_vec = build_constraints_matrix(constraints, n_vars)
+    A_constr, l, u, sense_vec, row_constraints = build_constraints_matrix(constraints, n_vars)
 
     # Variable bounds are separate from constraint bounds.
     # For OSQP/PIQP: we encode variable bounds as extra rows in the constraint matrix.
@@ -229,17 +257,14 @@ def solve(
         has_bounds = any(v.lb > -np.inf or v.ub < np.inf for v in variables)
 
         if A_constr.nnz > 0 and has_bounds:
-            lb_rows = np.eye(n_vars)
-            ub_rows = -np.eye(n_vars)
-            A_full = sp.vstack([A_constr.tocsr(), lb_rows, ub_rows]).tocsc()
-            l_full = np.concatenate([l, -ub])
-            u_full = np.concatenate([u, -lb])
+            bound_rows = sp.eye(n_vars, format="csr")
+            A_full = sp.vstack([A_constr.tocsr(), bound_rows]).tocsc()
+            l_full = np.concatenate([l, lb])
+            u_full = np.concatenate([u, ub])
         elif has_bounds:
-            lb_rows = np.eye(n_vars)
-            ub_rows = -np.eye(n_vars)
-            A_full = sp.vstack([lb_rows, ub_rows]).tocsc()
-            l_full = -ub
-            u_full = -lb
+            A_full = sp.eye(n_vars, format="csc")
+            l_full = lb
+            u_full = ub
         else:
             A_full = A_constr.tocsc() if A_constr.nnz > 0 else sp.coo_matrix((0, n_vars))
             l_full = np.array([], dtype=np.float64)
@@ -249,14 +274,22 @@ def solve(
             P.tocsc(), c, A_full.tocsc(), l_full, u_full, **options
         )
 
+        y_arr = np.array(result.get("y", []))
+        dual_map = {
+            id(rc): float(y_arr[i])
+            for i, rc in enumerate(row_constraints)
+            if i < len(y_arr)
+        }
+
         return Solution(
             x=np.array(result["x"]),
-            obj_val=obj_sign * float(result["obj_val"]),
+            obj_val=obj_sign * float(result["obj_val"]) + obj_sign * obj_offset,
             status=result["status"],
             solver=solver,
             problem=problem,
-            y=np.array(result.get("y", [])),
+            y=y_arr,
             residuals=result.get("residuals", {}),
+            _dual_map=dual_map,
         )
 
     elif solver == "piqp":
@@ -274,7 +307,7 @@ def solve(
 
         return Solution(
             x=np.array(result["x"]),
-            obj_val=obj_sign * float(result["obj_val"]),
+            obj_val=obj_sign * float(result["obj_val"]) + obj_sign * obj_offset,
             status=result["status"],
             solver=solver,
             problem=problem,
@@ -300,7 +333,7 @@ def solve(
 
         return Solution(
             x=np.array(result["x"]),
-            obj_val=obj_sign * float(result["obj_val"]),
+            obj_val=obj_sign * float(result["obj_val"]) + obj_sign * obj_offset,
             status=result["status"],
             solver=solver,
             problem=problem,
@@ -332,20 +365,29 @@ def solve(
             b_full = np.array([], dtype=np.float64)
         else:
             sense_full = sense_vec
-            b_full = np.where(u != np.inf, np.minimum(ub, u), ub)
+            # b is the per-row RHS: <= uses u, >= uses l, == has l == u.
+            b_full = np.where(sense_vec == 0.0, u, l)
 
         result = backend.solve(  # type: ignore[union-attr]
             A_full, b_full, c, lb, ub, sense_full, **options
         )
 
+        y_arr = np.array(result.get("y", []))
+        dual_map = {
+            id(rc): float(y_arr[i])
+            for i, rc in enumerate(row_constraints)
+            if i < len(y_arr)
+        }
+
         return Solution(
             x=np.array(result["x"]),
-            obj_val=obj_sign * float(result["obj_val"]),
+            obj_val=obj_sign * float(result["obj_val"]) + obj_sign * obj_offset,
             status=result["status"],
             solver=solver,
             problem=problem,
-            y=np.array(result.get("y", [])),
+            y=y_arr,
             residuals=result.get("residuals", {}),
+            _dual_map=dual_map,
         )
 
     elif solver in ("highs", "scip", "gurobi"):
@@ -355,43 +397,14 @@ def solve(
         has_ub = any(v.ub < np.inf for v in variables)
 
         if A_constr.nnz > 0 and (has_lb or has_ub):
-            rows_list = [A_constr.tocsr()]
-            l_parts = list(l)
-            u_parts = list(u)
-
-            if has_lb:
-                # lb <= x  ->  x >= lb  ->  lower=lb, upper=inf
-                rows_list.append(sp.csr_matrix(np.eye(n_vars)))
-                l_parts.extend(lb.tolist())
-                u_parts.extend([np.inf] * n_vars)
-
-            if has_ub:
-                # x <= ub  ->  -x >= -ub  ->  lower=-ub, upper=inf
-                rows_list.append(sp.csr_matrix(-np.eye(n_vars)))
-                l_parts.extend((-ub).tolist())
-                u_parts.extend([np.inf] * n_vars)
-
-            A_full = sp.vstack(rows_list).tocsc()
-            l_full = np.array(l_parts, dtype=np.float64)
-            u_full = np.array(u_parts, dtype=np.float64)
+            bound_rows = sp.eye(n_vars, format="csr")
+            A_full = sp.vstack([A_constr.tocsr(), bound_rows]).tocsc()
+            l_full = np.concatenate([l, lb])
+            u_full = np.concatenate([u, ub])
         elif has_lb or has_ub:
-            rows_list = []
-            l_parts = []
-            u_parts = []
-
-            if has_lb:
-                rows_list.append(sp.csr_matrix(np.eye(n_vars)))
-                l_parts.extend(lb.tolist())
-                u_parts.extend([np.inf] * n_vars)
-
-            if has_ub:
-                rows_list.append(sp.csr_matrix(-np.eye(n_vars)))
-                l_parts.extend((-ub).tolist())
-                u_parts.extend([np.inf] * n_vars)
-
-            A_full = sp.vstack(rows_list).tocsc()
-            l_full = np.array(l_parts, dtype=np.float64)
-            u_full = np.array(u_parts, dtype=np.float64)
+            A_full = sp.eye(n_vars, format="csc")
+            l_full = lb
+            u_full = ub
         else:
             A_full = A_constr.tocsc() if A_constr.nnz > 0 else sp.coo_matrix((0, n_vars))
             l_full = np.array([], dtype=np.float64)
@@ -409,14 +422,24 @@ def solve(
         x_full = np.array(result["x"])
         x_out = x_full[: problem.n_vars] if sos_constraints else x_full
 
+        y_arr = np.array(result.get("y", []))
+        dual_map = {}
+        if solver == "highs":
+            dual_map = {
+                id(rc): float(y_arr[i])
+                for i, rc in enumerate(row_constraints)
+                if i < len(y_arr)
+            }
+
         return Solution(
             x=x_out,
-            obj_val=obj_sign * float(result["obj_val"]),
+            obj_val=obj_sign * float(result["obj_val"]) + obj_sign * obj_offset,
             status=result["status"],
             solver=solver,
             problem=problem,
-            y=np.array(result.get("y", [])),
+            y=y_arr,
             residuals=result.get("residuals", {}),
+            _dual_map=dual_map,
         )
 
     else:

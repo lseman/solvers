@@ -21,7 +21,8 @@
 #include <vector>
 #include "../common/sparse_csc.h"
 #include "../common/trisolve.h"
-#include "ldlt_simd.h"
+#include "../simd/ldlt_simd.h"
+#include "../common/dense_bk.h"
 
 namespace ldlt {
 
@@ -120,187 +121,46 @@ inline void BunchKaufmanLDLT::factorize(const MatrixType& A) {
     }
 
     const size_t N = static_cast< size_t >(n);
-
-    // Dense symmetric working copy of A (row-major, both triangles kept in sync)
-    std::vector< Real > w(N * N, 0.0);
-    auto W = [&w, N](Int i, Int j) -> Real& {
-        return w[static_cast< size_t >(i) * N + static_cast< size_t >(j)];
-    };
+    linsys::DenseMatrix< Real > front(n, n);
     for (Int j = 0; j < n; ++j) {
         for (Int p = static_cast< Int >(A.Ap[static_cast< size_t >(j)]);
              p < static_cast< Int >(A.Ap[static_cast< size_t >(j + 1)]); ++p) {
             const Int i = A.Ai[static_cast< size_t >(p)];
             const Real v = A.Ax[static_cast< size_t >(p)];
-            W(i, j) = v;
-            W(j, i) = v;
+            front(i, j) = v;
+            front(j, i) = v;
         }
     }
 
-    // Permutation: perm[i] = original row index now at position i
-    std::vector< Int > perm(N);
-    std::iota(perm.begin(), perm.end(), 0);
+    detail::DenseBunchKaufmanOptions< Real, Int > options;
+    options.inertia_tolerance = m_pivot_tolerance;
+    const auto dense_factors =
+        detail::denseBunchKaufman(front, n, options);
 
-    // Symmetric row+col swap in w, tracked in perm. Swapping full rows also
-    // permutes the rows of already-computed L multipliers stored in the strict
-    // lower triangle of factored columns (LAPACK-style), keeping L consistent
-    // with the final permutation.
-    auto symswap = [&](Int a, Int b) {
-        if (a == b)
-            return;
-        for (Int j = 0; j < n; ++j)
-            std::swap(W(a, j), W(b, j));
-        for (Int i = 0; i < n; ++i)
-            std::swap(W(i, a), W(i, b));
-        std::swap(perm[static_cast< size_t >(a)], perm[static_cast< size_t >(b)]);
-    };
-
+    m_factors.num_pos = dense_factors.positive_inertia;
+    m_factors.num_neg = dense_factors.negative_inertia;
+    m_factors.num_zero = dense_factors.zero_inertia;
     m_factors.D.clear();
     m_factors.block_info.assign(N, 0);
-
-    const Real alpha = (1.0 + std::sqrt(17.0)) / 8.0; // Bunch-Kaufman constant
-    const Real tol = m_pivot_tolerance;
-
-    // Scratch: saved pivot column(s) and 2x2 multipliers
-    std::vector< Real > c0(N), c1(N), mx(N), my(N);
-
-    Int k = 0;
-    while (k < n) {
-        // lambda = max |W(i,k)| below the diagonal, r = its row
-        Real lambda = 0.0;
-        Int r = k;
-        for (Int i = k + 1; i < n; ++i) {
-            const Real v = std::abs(W(i, k));
-            if (v > lambda) {
-                lambda = v;
-                r = i;
-            }
-        }
-        const Real absakk = std::abs(W(k, k));
-
-        // Bunch-Kaufman pivot selection
-        bool two_by_two = false;
-        Int swap_row = k;
-        if (lambda > 0.0 && absakk < alpha * lambda) {
-            // sigma = max off-diagonal magnitude in column r of the trailing submatrix
-            Real sigma = 0.0;
-            for (Int i = k; i < n; ++i) {
-                if (i != r)
-                    sigma = std::max(sigma, std::abs(W(i, r)));
-            }
-            if (absakk * sigma >= alpha * lambda * lambda) {
-                // 1x1 pivot with W(k,k)
-            } else if (std::abs(W(r, r)) >= alpha * sigma) {
-                swap_row = r; // 1x1 pivot with W(r,r)
-            } else {
-                two_by_two = true; // 2x2 pivot with rows k and r
-            }
-        }
-
-        if (!two_by_two) {
-            // ─── 1x1 pivot ──────────────────────────────────────────────────────
-            symswap(k, swap_row);
-
-            const Real d = W(k, k);
-            m_factors.D.push_back(d);
-            m_factors.block_info[static_cast< size_t >(k)] = 1;
-            if (d > tol)
-                ++m_factors.num_pos;
-            else if (d < -tol)
-                ++m_factors.num_neg;
-            else
-                ++m_factors.num_zero;
-
-            // Save pivot column, overwrite it with multipliers L(i,k) = W(i,k) / d
-            const Real dinv = (d != Real(0)) ? Real(1) / d : Real(0);
-            for (Int i = k + 1; i < n; ++i) {
-                c0[static_cast< size_t >(i)] = W(i, k);
-                W(i, k) = c0[static_cast< size_t >(i)] * dinv;
-            }
-
-            // Schur complement: W(i,j) -= c0[i] * c0[j] / d, both triangles
-            for (Int j = k + 1; j < n; ++j) {
-                const Real s = c0[static_cast< size_t >(j)] * dinv;
-                if (s == Real(0))
-                    continue;
-                for (Int i = j; i < n; ++i) {
-                    const Real upd = c0[static_cast< size_t >(i)] * s;
-                    W(i, j) -= upd;
-                    if (i != j)
-                        W(j, i) -= upd;
-                }
-            }
-
-            ++k;
-        } else {
-            // ─── 2x2 pivot ──────────────────────────────────────────────────────
-            symswap(k + 1, r);
-
-            const Real d11 = W(k, k);
-            const Real d21 = W(k + 1, k);
-            const Real d22 = W(k + 1, k + 1);
-            const Real det = d11 * d22 - d21 * d21;
-
-            m_factors.D.push_back(d11);
-            m_factors.D.push_back(d21);
-            m_factors.D.push_back(d22);
-            m_factors.block_info[static_cast< size_t >(k)] = 2;
+    for (Int k = 0; k < n;) {
+        const int8_t block =
+            dense_factors.blocks[static_cast< size_t >(k)];
+        m_factors.block_info[static_cast< size_t >(k)] = block;
+        m_factors.D.push_back(
+            dense_factors.diagonal[static_cast< size_t >(k)]);
+        if (block == int8_t{2}) {
             m_factors.block_info[static_cast< size_t >(k + 1)] = 0;
-
-            // Inertia of the 2x2 block (BK 2x2 pivots have det < 0 by construction)
-            if (det < 0) {
-                ++m_factors.num_pos;
-                ++m_factors.num_neg;
-            } else if (det > 0) {
-                if (d11 + d22 > 0)
-                    m_factors.num_pos += 2;
-                else
-                    m_factors.num_neg += 2;
-            } else {
-                const Real trace = d11 + d22;
-                if (trace > tol) {
-                    ++m_factors.num_pos;
-                    ++m_factors.num_zero;
-                } else if (trace < -tol) {
-                    ++m_factors.num_neg;
-                    ++m_factors.num_zero;
-                } else {
-                    m_factors.num_zero += 2;
-                }
-            }
-
-            // Save pivot columns, overwrite them with multipliers
-            // [mx;my] = inv([d11 d21; d21 d22]) * [c0; c1]
-            const Real detinv = (det != Real(0)) ? Real(1) / det : Real(0);
-            for (Int i = k + 2; i < n; ++i) {
-                const Real b0 = W(i, k);
-                const Real b1 = W(i, k + 1);
-                c0[static_cast< size_t >(i)] = b0;
-                c1[static_cast< size_t >(i)] = b1;
-                const Real x = (b0 * d22 - b1 * d21) * detinv;
-                const Real y = (b1 * d11 - b0 * d21) * detinv;
-                mx[static_cast< size_t >(i)] = x;
-                my[static_cast< size_t >(i)] = y;
-                W(i, k) = x;
-                W(i, k + 1) = y;
-            }
-
-            // Schur complement: W(i,j) -= [mx_i my_i] * B * [mx_j; my_j]
-            //                          = mx_i * c0[j] + my_i * c1[j]   (B * m_j = c_j)
-            for (Int j = k + 2; j < n; ++j) {
-                for (Int i = j; i < n; ++i) {
-                    const Real upd = mx[static_cast< size_t >(i)] * c0[static_cast< size_t >(j)] +
-                                     my[static_cast< size_t >(i)] * c1[static_cast< size_t >(j)];
-                    W(i, j) -= upd;
-                    if (i != j)
-                        W(j, i) -= upd;
-                }
-            }
-
+            m_factors.D.push_back(
+                dense_factors.subdiagonal[static_cast< size_t >(k)]);
+            m_factors.D.push_back(
+                dense_factors.diagonal[static_cast< size_t >(k + 1)]);
             k += 2;
+        } else {
+            ++k;
         }
     }
 
-    // Extract L (strict lower triangle of w, multipliers) into CSC format.
+    // Extract L (strict lower triangle of the dense front) into CSC format.
     // For a 2x2 block starting at column k, L(k+1,k) = 0 (the pivot-block
     // entry left in w there is d21, not a multiplier), so start at k+2.
     m_factors.Lp.assign(N + 1, 0);
@@ -309,7 +169,7 @@ inline void BunchKaufmanLDLT::factorize(const MatrixType& A) {
     for (Int j = 0; j < n; ++j) {
         const Int first = (m_factors.block_info[static_cast< size_t >(j)] == 2) ? j + 2 : j + 1;
         for (Int i = first; i < n; ++i) {
-            const Real v = W(i, j);
+            const Real v = front(i, j);
             if (v != Real(0)) {
                 m_factors.Li.push_back(i);
                 m_factors.Lx.push_back(v);
@@ -318,7 +178,7 @@ inline void BunchKaufmanLDLT::factorize(const MatrixType& A) {
         m_factors.Lp[static_cast< size_t >(j + 1)] = static_cast< Int >(m_factors.Li.size());
     }
 
-    m_factors.perm = std::move(perm);
+    m_factors.perm = dense_factors.permutation;
     m_factors.factorized = true;
 }
 

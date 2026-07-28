@@ -13,6 +13,8 @@
 
 #pragma once
 
+#include "qp/common/problem.h"
+
 #include <Eigen/Cholesky>
 #include <Eigen/Core>
 #include <Eigen/SparseCore>
@@ -611,5 +613,40 @@ class QP {
         return result;
     }
 };
+
+// -------- Shared-interface adapter (qp_common::QPProblem/QPResult) --------
+// proxqp's native form already matches: Ax = b, l <= Cx <= u.
+inline qp_common::QPResult solve_common(const qp_common::QPProblem& prob,
+                                        Settings settings = Settings{}) {
+    const int n = prob.n();
+    const int n_eq = prob.n_eq();
+    const int n_in = prob.n_in();
+
+    QP qp(n, n_eq, n_in, settings);
+    std::optional<SparseMatrix> A_opt = n_eq > 0 ? std::optional<SparseMatrix>(prob.A) : std::nullopt;
+    std::optional<Vector> b_opt = n_eq > 0 ? std::optional<Vector>(prob.b) : std::nullopt;
+    std::optional<SparseMatrix> C_opt = n_in > 0 ? std::optional<SparseMatrix>(prob.C) : std::nullopt;
+    std::optional<Vector> l_opt = n_in > 0 ? std::optional<Vector>(prob.l) : std::nullopt;
+    std::optional<Vector> u_opt = n_in > 0 ? std::optional<Vector>(prob.u) : std::nullopt;
+    qp.init(prob.P, prob.q, A_opt, b_opt, C_opt, l_opt, u_opt);
+
+    Result raw = qp.solve();
+
+    qp_common::QPResult out;
+    switch (raw.status) {
+        case PROXQP_SOLVED: out.status = qp_common::QPStatus::Solved; break;
+        case PROXQP_PRIMAL_INFEASIBLE: out.status = qp_common::QPStatus::PrimalInfeasible; break;
+        case PROXQP_DUAL_INFEASIBLE: out.status = qp_common::QPStatus::DualInfeasible; break;
+        default: out.status = qp_common::QPStatus::MaxIterReached; break;
+    }
+    out.iters = raw.info.iter;
+    out.obj_val = raw.info.obj_val;
+    out.x = raw.x;
+    out.y = raw.y;
+    out.z = raw.z;
+    out.pri_res = raw.info.pri_res;
+    out.dua_res = raw.info.dua_res;
+    return out;
+}
 
 } // namespace proxqp

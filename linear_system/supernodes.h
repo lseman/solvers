@@ -230,9 +230,12 @@ static SupernodeInfo<IntT>
 identify_supernodes(const SparseUpperCSC<IntT> &B, const Symbolic<IntT> &S,
                     IntT relax_abs = 0, double relax_rel = 0.0,
                     double tau = 1.0,
-                    IntT max_size = std::numeric_limits<IntT>::max()) {
+                    IntT max_size = std::numeric_limits<IntT>::max(),
+                    const std::vector<std::pair<IntT, double>>
+                        *size_dependent_relaxation = nullptr) {
   const IntT n = B.n;
-  if (relax_rel < 0.0 && relax_abs < 0)
+  if (relax_rel < 0.0 && relax_abs < 0 &&
+      size_dependent_relaxation == nullptr)
     throw std::invalid_argument("snode: at least one relaxation limit is required");
   if (tau < 0.0 || tau > 1.0)
     throw std::invalid_argument("snode: tau must be in [0, 1]");
@@ -328,9 +331,21 @@ identify_supernodes(const SparseUpperCSC<IntT> &B, const Symbolic<IntT> &S,
     const bool within_relative =
         relax_rel < 0.0 || zero_fraction <= relax_rel;
     const bool dense_enough = 1.0 - zero_fraction >= tau;
+    bool within_size_dependent_relaxation = false;
+    if (size_dependent_relaxation != nullptr) {
+      for (const auto &[column_limit, zero_limit] :
+           *size_dependent_relaxation) {
+        if (merged_width <= column_limit && zero_fraction <= zero_limit) {
+          within_size_dependent_relaxation = true;
+          break;
+        }
+      }
+    }
 
     if (new_zeros == 0.0 ||
-        (within_absolute && within_relative && dense_enough)) {
+        (size_dependent_relaxation != nullptr
+             ? within_size_dependent_relaxation
+             : (within_absolute && within_relative && dense_enough))) {
       merged[static_cast<size_t>(parent)] = s;
       explicit_zeros[static_cast<size_t>(s)] = total_zeros;
       leading_nnz[static_cast<size_t>(s)] =

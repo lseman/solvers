@@ -23,6 +23,17 @@ Supported problem types:
 - MIP (mixed-integer programming) via HiGHS, SCIP, or Gurobi, including SOS1/SOS2
 - Piecewise-linear interpolation (1D and 2D) and McCormick bilinear relaxation
 
+Other features:
+- ``Parameter``: a mutable scalar usable in expressions/bounds — change
+  ``.value`` and re-solve without rebuilding the Problem.
+- ``Problem.add_constraints(A @ x, sense, b)``: batch constraints from a
+  NumPy object-array of Variables (``A @ x`` already dispatches through
+  Expression arithmetic; this adds one row per constraint).
+- ``Solution.dual(constraint)``: per-constraint dual value, for the
+  ``osqp``, ``highs``, and ``ipm`` backends.
+- ``solve(pb, solver="highs", x0=[...])``: warm-start HiGHS with an initial
+  primal solution (seeds the MIP incumbent via presolve).
+
 Solver backends:
 - ``osqp``: Sparse ADMM QP solver (first-order, large-scale)
 - ``piqp``: Interior-point QP solver (predictor-corrector)
@@ -42,6 +53,7 @@ from .model import (
     Problem,
     Variable,
 )
+from .parameter import Parameter
 from .sos import SOSConstraint
 from .solve import Solution, solve
 from .conic import (
@@ -69,6 +81,7 @@ __all__ = [
     "Variable",
     "IntVar",
     "BinVar",
+    "Parameter",
     "Expression",
     "Constraint",
     "SOSConstraint",

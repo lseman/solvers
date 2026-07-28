@@ -33,38 +33,26 @@ class PIQPBackend:
     ) -> dict:
         import numpy as np
 
-        P_csc = P.tocsc()
-        solver = self._piqp.SparseQP()
+        # The compiled extension takes dense ndarrays.
+        P_dense = np.asarray(P.toarray() if hasattr(P, "toarray") else P, dtype=np.float64)
+        q_np = np.asarray(q, dtype=np.float64)
+        A_dense = np.asarray(A.toarray(), dtype=np.float64) if A is not None else None
+        b_np = np.asarray(b, dtype=np.float64) if b is not None else None
+        G_dense = np.asarray(G.toarray(), dtype=np.float64) if G is not None else None
+        h_np = np.asarray(h, dtype=np.float64) if h is not None else None
 
-        # Setup problem
-        solver.setup(
-            P_csc,
-            np.asarray(q, dtype=np.float64),
-            A.tocsc() if A is not None else None,
-            np.asarray(b, dtype=np.float64) if b is not None else None,
-            G.tocsc() if G is not None else None,
-            np.asarray(h, dtype=np.float64) if h is not None else None,
-        )
-
-        # Apply settings
         settings = self._piqp.PIQPSettings()
         for k, v in options.items():
             if hasattr(settings, k):
                 setattr(settings, k, v)
-        solver.setSettings(settings)
 
-        solver.solve()
+        result = self._piqp.solve(P_dense, q_np, A_dense, b_np, G_dense, h_np, settings)
 
         return {
-            "x": solver.x(),
-            "y": solver.y(),
-            "obj_val": float(solver.objValue()),
-            "status": solver.status(),
-            "iter": solver.iterations(),
-            "residuals": {
-                "eq_inf": float(solver.residuals().eq_inf),
-                "ineq_inf": float(solver.residuals().ineq_inf),
-                "stat_inf": float(solver.residuals().stat_inf),
-                "gap": float(solver.residuals().gap),
-            },
+            "x": np.asarray(result["x"]),
+            "y": np.asarray(result["y"]),
+            "obj_val": result["obj_val"],
+            "status": result["status"],
+            "iter": result.get("iterations", 0),
+            "residuals": result.get("residuals", {}),
         }
