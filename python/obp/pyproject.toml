@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "obp"
+version = "0.1.0"
+description = "Lightweight DSL for optimization — PuLP-like modeling on top of optBlocks' fast C++ solvers"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "scipy",
+]
+optional-dependencies = {
+    "highs" = ["highspy"],
+    "osqp" = ["osqp"],
+    "piqp" = ["piqp"],
+    "scip" = ["pyscipopt"],
+    "gurobi" = ["gurobipy"],
+    "proxqp" = ["proxqp"],
+}
+
+[project.urls]
+Repository = "https://github.com/semansman/solvers"
+
+[tool.setuptools.packages.find]
+include = ["obp*"]
+exclude = ["obp.__pycache__*", "obp.*.__pycache__*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "solver: requires a specific solver backend",
+]

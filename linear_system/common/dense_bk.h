@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -34,6 +35,21 @@ struct DenseBunchKaufmanOptions {
     bool strict_pivots = false;
     Index global_column_begin = Index(0);
     const std::vector< int8_t >* expected_pivot_signs = nullptr;
+
+    // Optional extra regularization floor, folded in via max() with the
+    // abs/rel threshold before a pivot is judged singular (e.g. a
+    // sign-preservation bound computed from the trailing front, as in
+    // Zanetti & Gondzio's Proposition 3). local_col is the pivot-block-local
+    // column index k; default_threshold is what would be used without this
+    // hook. Left unset, behavior is identical to today's.
+    std::function< Scalar(Index local_col, Scalar default_threshold) > custom_regularization_floor;
+
+    // When a 2x2 pivot is judged singular: false (default) shifts d11/d22 by
+    // +-threshold and recomputes the determinant (today's behavior); true
+    // instead replaces the determinant directly with a signed floor
+    // (matches Proposition 3's guarantee, which bounds the Schur complement
+    // via the determinant rather than the individual diagonal entries).
+    bool direct_2x2_replacement = false;
 };
 
 template < typename Scalar, typename Index >
@@ -119,10 +135,12 @@ denseBunchKaufman(linsys::DenseMatrix< Scalar >& front, Index pivot_count,
                 sign = (*options.expected_pivot_signs)[original];
         }
         ++result.perturbed_pivots;
-        const Scalar replacement =
+        Scalar floor_value =
             threshold > Scalar(0) ? threshold
                                   : std::numeric_limits< Scalar >::epsilon();
-        return static_cast< Scalar >(sign) * replacement;
+        if (options.custom_regularization_floor)
+            floor_value = std::max(floor_value, options.custom_regularization_floor(local, floor_value));
+        return static_cast< Scalar >(sign) * floor_value;
     };
 
     constexpr Scalar alpha =
@@ -203,13 +221,19 @@ denseBunchKaufman(linsys::DenseMatrix< Scalar >& front, Index pivot_count,
                  determinant_threshold * determinant_threshold)) {
             if (options.strict_pivots)
                 throw std::domain_error("dense BK: singular 2x2 pivot");
-            const Scalar shift =
+            Scalar floor =
                 determinant_threshold > Scalar(0)
                     ? determinant_threshold
                     : std::numeric_limits< Scalar >::epsilon();
-            d11 += d11 < Scalar(0) ? -shift : shift;
-            d22 += d22 < Scalar(0) ? -shift : shift;
-            determinant = d11 * d22 - d21 * d21;
+            if (options.custom_regularization_floor)
+                floor = std::max(floor, options.custom_regularization_floor(k, floor));
+            if (options.direct_2x2_replacement) {
+                determinant = determinant < Scalar(0) ? -floor : floor;
+            } else {
+                d11 += d11 < Scalar(0) ? -floor : floor;
+                d22 += d22 < Scalar(0) ? -floor : floor;
+                determinant = d11 * d22 - d21 * d21;
+            }
             ++result.perturbed_pivots;
         }
 

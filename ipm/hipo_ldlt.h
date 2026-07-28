@@ -62,6 +62,7 @@
 #include <utility>
 #include <vector>
 
+#include "../linear_system/common/dense_bk.h"
 #include "../linear_system/common/dense_matrix.h"
 #include "../linear_system/common/ordering.h"
 #include "../linear_system/common/sparse_csc.h"
@@ -712,7 +713,7 @@ class HiPOLDLT {
     // Proposition 3 (§4.6): minimum |p| such that every resulting Schur
     // diagonal entry (M11)_jj +/- (q1)_j^2/|p| keeps its sign. j ranges over
     // ALL rows the pivot updates (pivot-block + update rows) even though the
-    // pivot search itself (below) is restricted to the pivot block.
+    // pivot search itself is restricted to the pivot block.
     static HReal minSignPreservingPivotMagnitude(const linsys::DenseMatrix< HReal >& F, HIndex k,
                                                  HIndex fsize) {
         HReal bound = 0.0;
@@ -734,9 +735,12 @@ class HiPOLDLT {
     // pivot-block columns [0, npiv) (§4.5: "only the portion of pivotal
     // columns within BD are considered, while entries in BP are not used
     // during pivoting"), with the Schur update applied across the full
-    // [0, fsize) frontal matrix. Dynamic regularisation uses the
-    // Proposition 3 bound (§4.6) once a pivot is already below the static
-    // floor.
+    // [0, fsize) frontal matrix. Delegates the shared pivot-search/swap/
+    // rank-1/rank-2-update kernel to linear_system/common/dense_bk.h;
+    // dynamic regularisation plugs in the Proposition 3 bound (§4.6) via
+    // that kernel's custom_regularization_floor hook, replacing the pivot
+    // (1x1) or determinant (2x2, via direct_2x2_replacement) directly once a
+    // pivot is already below the static floor.
     // localPerm[k] = the local pivot-block index (into [0, npiv)) whose
     // original column now sits at position k after BK's within-block swaps.
     // Callers need this because L-extraction and the D/block_info storage
@@ -746,137 +750,71 @@ class HiPOLDLT {
     void bkFactorizeFrontal(linsys::DenseMatrix< HReal >& F, HIndex fsize, HIndex npiv,
                             std::vector< HReal >& D_local, std::vector< HIndex >& block_local,
                             std::vector< HIndex >& localPerm) {
-        D_local.clear();
-        block_local.assign(static_cast< size_t >(npiv), 0);
-        localPerm.resize(static_cast< size_t >(npiv));
-        for (HIndex i = 0; i < npiv; ++i)
-            localPerm[static_cast< size_t >(i)] = i;
-
-        const HReal alpha = (1.0 + std::sqrt(17.0)) / 8.0; // Bunch-Kaufman constant
-        std::vector< HReal > c0(static_cast< size_t >(fsize)), c1(static_cast< size_t >(fsize));
-        std::vector< HReal > mx(static_cast< size_t >(fsize)), my(static_cast< size_t >(fsize));
-
-        auto symswap = [&](HIndex a, HIndex b, HIndex active_start) {
-            if (a == b)
-                return;
-            // Swap the already-computed L rows, but do not interchange prior
-            // pivot columns/diagonals. Apply the symmetric permutation only
-            // to the active trailing matrix.
-            for (HIndex j = 0; j < active_start; ++j)
-                std::swap(F(a, j), F(b, j));
-            for (HIndex j = active_start; j < fsize; ++j)
-                std::swap(F(a, j), F(b, j));
-            for (HIndex i = active_start; i < fsize; ++i)
-                std::swap(F(i, a), F(i, b));
-            if (a < npiv && b < npiv)
-                std::swap(localPerm[static_cast< size_t >(a)], localPerm[static_cast< size_t >(b)]);
+        ldlt::detail::DenseBunchKaufmanOptions< HReal, HIndex > options;
+        options.absolute_regularization = HIPO_PIVOT_TOL;
+        options.regularize_singular_pivots = true;
+        options.direct_2x2_replacement = true;
+        options.custom_regularization_floor = [&](HIndex k, HReal /*default_floor*/) {
+            return std::max(HIPO_STATIC_REG, minSignPreservingPivotMagnitude(F, k, fsize));
         };
 
-        HIndex k = 0;
-        while (k < npiv) {
-            // Pivot search restricted to [k, npiv) — the frontal matrix's
-            // own pivot-block columns, per §4.5.
-            HReal lambda = 0.0;
-            HIndex r = k;
-            for (HIndex i = k + 1; i < npiv; ++i) {
-                const HReal v = std::abs(F(i, k));
-                if (v > lambda) {
-                    lambda = v;
-                    r = i;
-                }
-            }
-            const HReal absakk = std::abs(F(k, k));
+        auto result = ldlt::detail::denseBunchKaufman< HReal, HIndex >(F, npiv, options);
 
-            bool two_by_two = false;
-            HIndex swap_row = k;
-            if (lambda > 0.0 && absakk < alpha * lambda) {
-                HReal sigma = 0.0;
-                for (HIndex i = k; i < npiv; ++i) {
-                    if (i != r)
-                        sigma = std::max(sigma, std::abs(F(i, r)));
-                }
-                if (absakk * sigma >= alpha * lambda * lambda) {
-                    // 1x1 pivot with F(k,k)
-                } else if (std::abs(F(r, r)) >= alpha * sigma) {
-                    swap_row = r; // 1x1 pivot with F(r,r)
-                } else {
-                    two_by_two = true;
-                }
-            }
-
-            if (!two_by_two) {
-                symswap(k, swap_row, k);
-                HReal d = F(k, k);
-
-                if (std::abs(d) < HIPO_PIVOT_TOL) {
-                    const HReal propBound = minSignPreservingPivotMagnitude(F, k, fsize);
-                    const HReal floor = std::max(HIPO_STATIC_REG, propBound);
-                    d = (d < 0.0 ? -floor : floor);
-                    ++m_factor.perturbed_pivots;
-                }
-                D_local.push_back(d);
-                block_local[static_cast< size_t >(k)] = 1;
-
-                const HReal absd = std::abs(d);
-                if (m_factor.min_abs_pivot == 0.0 || absd < m_factor.min_abs_pivot)
-                    m_factor.min_abs_pivot = absd;
-
-                const HReal dinv = (d != 0.0) ? 1.0 / d : 0.0;
-                for (HIndex i = k + 1; i < fsize; ++i) {
-                    c0[static_cast< size_t >(i)] = F(i, k);
-                    F(i, k) = c0[static_cast< size_t >(i)] * dinv;
-                }
-                for (HIndex j = k + 1; j < fsize; ++j) {
-                    const HReal s = c0[static_cast< size_t >(j)] * dinv;
-                    if (s == 0.0)
-                        continue;
-                    for (HIndex i = j; i < fsize; ++i) {
-                        const HReal upd = c0[static_cast< size_t >(i)] * s;
-                        F(i, j) -= upd;
-                        if (i != j)
-                            F(j, i) -= upd;
-                    }
-                }
-                ++k;
+        D_local.clear();
+        block_local.assign(result.blocks.begin(), result.blocks.end());
+        localPerm = std::move(result.permutation);
+        HIndex num_2x2_here = 0;
+        for (HIndex k = 0; k < npiv;) {
+            D_local.push_back(result.diagonal[static_cast< size_t >(k)]);
+            if (block_local[static_cast< size_t >(k)] == 2) {
+                D_local.push_back(result.subdiagonal[static_cast< size_t >(k)]);
+                D_local.push_back(result.diagonal[static_cast< size_t >(k + 1)]);
+                ++num_2x2_here;
+                k += 2;
             } else {
-                symswap(k + 1, r, k);
-                const HReal d11 = F(k, k), d21 = F(k + 1, k), d22 = F(k + 1, k + 1);
-                HReal det = d11 * d22 - d21 * d21;
+                ++k;
+            }
+        }
 
-                if (std::abs(det) < HIPO_PIVOT_TOL * HIPO_PIVOT_TOL) {
-                    const HReal floor = HIPO_STATIC_REG;
-                    det = (det < 0.0 ? -floor : floor);
-                    ++m_factor.perturbed_pivots;
-                }
-                D_local.push_back(d11);
-                D_local.push_back(d21);
-                D_local.push_back(d22);
-                block_local[static_cast< size_t >(k)] = 2;
-                block_local[static_cast< size_t >(k + 1)] = 0;
-                ++m_factor.num_2x2;
+        m_factor.perturbed_pivots += result.perturbed_pivots;
+        m_factor.num_2x2 += num_2x2_here;
+        if (m_factor.min_abs_pivot == 0.0 || result.min_abs_pivot < m_factor.min_abs_pivot)
+            m_factor.min_abs_pivot = result.min_abs_pivot;
 
-                const HReal detinv = (det != 0.0) ? 1.0 / det : 0.0;
-                for (HIndex i = k + 2; i < fsize; ++i) {
-                    const HReal b0 = F(i, k), b1 = F(i, k + 1);
-                    c0[static_cast< size_t >(i)] = b0;
-                    c1[static_cast< size_t >(i)] = b1;
-                    const HReal x = (b0 * d22 - b1 * d21) * detinv;
-                    const HReal y = (b1 * d11 - b0 * d21) * detinv;
-                    mx[static_cast< size_t >(i)] = x;
-                    my[static_cast< size_t >(i)] = y;
-                    F(i, k) = x;
-                    F(i, k + 1) = y;
-                }
-                for (HIndex j = k + 2; j < fsize; ++j) {
+        // denseBunchKaufman() only forms the L multipliers for rows >= npiv
+        // (the update-row block); it does not update F(i,j) there, since its
+        // other caller (supernodal_ldlt.h) applies that Schur update
+        // separately via BLAS. hipo needs F(npiv:fsize, npiv:fsize) to hold
+        // the actual Schur complement (extracted right after this call by
+        // factorizeSupernode), so apply it here: F(i,j) -= L(i,:)*D*L(j,:)^T
+        // over this supernode's own pivot columns, for update rows only.
+        for (HIndex k = 0; k < npiv;) {
+            if (block_local[static_cast< size_t >(k)] == 2) {
+                const HReal d11 = result.diagonal[static_cast< size_t >(k)];
+                const HReal d21 = result.subdiagonal[static_cast< size_t >(k)];
+                const HReal d22 = result.diagonal[static_cast< size_t >(k + 1)];
+                for (HIndex j = npiv; j < fsize; ++j) {
+                    const HReal lj0 = F(j, k), lj1 = F(j, k + 1);
                     for (HIndex i = j; i < fsize; ++i) {
-                        const HReal upd = mx[static_cast< size_t >(i)] * c0[static_cast< size_t >(j)] +
-                                          my[static_cast< size_t >(i)] * c1[static_cast< size_t >(j)];
+                        const HReal li0 = F(i, k), li1 = F(i, k + 1);
+                        const HReal upd = li0 * (d11 * lj0 + d21 * lj1) + li1 * (d21 * lj0 + d22 * lj1);
                         F(i, j) -= upd;
-                        if (i != j)
-                            F(j, i) -= upd;
+                        if (i != j) F(j, i) -= upd;
                     }
                 }
                 k += 2;
+            } else {
+                const HReal d = result.diagonal[static_cast< size_t >(k)];
+                for (HIndex j = npiv; j < fsize; ++j) {
+                    const HReal scaled = F(j, k) * d;
+                    if (scaled == 0.0) continue;
+                    for (HIndex i = j; i < fsize; ++i) {
+                        const HReal upd = F(i, k) * scaled;
+                        F(i, j) -= upd;
+                        if (i != j) F(j, i) -= upd;
+                    }
+                }
+                ++k;
             }
         }
     }

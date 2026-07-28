@@ -48,7 +48,7 @@ general-purpose structural and solve components:
 
 | Component | Location | Paper section | Also used standalone by |
 |---|---|---|---|
-| Supernode detection | `linear_system/supernodes.h` | §4.1 (supernode partition) | `python/supernodes_ext.cpp` |
+| Supernode detection | `linear_system/supernodes.h` | §4.1 (supernode partition) | `python/bindings/linear_system/supernodes_ext.cpp` |
 | AMD fill-reducing ordering | `linear_system/common/amd.h`, `common/ordering.h` | §4.2 (ordering — paper uses Metis nested dissection; we use AMD) | `linear_system/ldlt/ldlt.h`, `supernodal_ldlt.h` |
 | Sign-preserving pivot regularization | inlined in `hipo_ldlt.h::bkFactorizeFrontal` | §4.5–4.6 (static+dynamic regularization, Prop. 3 bound) | HiPO only |
 | CSC storage / triangular solves | `linear_system/common/sparse_csc.h`, `common/trisolve.h` | — (plumbing) | every solver in `linear_system/ldlt/` |
@@ -57,7 +57,7 @@ general-purpose structural and solve components:
 
 | `SolverType` | What it is | Backing code |
 |---|---|---|
-| `LDLT` | Plain simplicial LDLᵀ on the full augmented system. | `linear_system/ldlt/ldlt.h` (also `python/ldlt_ext.cpp`) |
+| `LDLT` | Plain simplicial LDLᵀ on the full augmented system. | `linear_system/ldlt/ldlt.h` (also `python/bindings/linear_system/ldlt_ext.cpp`) |
 | `SUPERNOODAL` | Augmented system, dense-BLAS-on-supernodes, natural (non-block) AMD, flat pivot regularization, and no refinement. | `linear_system/ldlt/supernodal_ldlt.h` |
 | `FRONTAL` | Schur-complement frontal method, a different multifrontal formulation than the paper's. **ipm-only.** | `linear_system/ldlt/schur_frontal_ldlt.h` + `linear_system/eigen_interop/schur_frontal_eigen_interop.h` |
 | `NORMAL_EQ` | Eliminate to the SPD normal equations instead of the augmented system. | `normal_eq_ldlt.h` |
@@ -66,4 +66,4 @@ general-purpose structural and solve components:
 
 The separate dense Bunch-Kaufman LDLᵀ implementation in
 `linear_system/ldlt/ldlt_bk.h` remains reachable through
-`python/ldlt_bk_ext.cpp`; HiPO has its own frontal BK kernel.
+`python/bindings/linear_system/ldlt_bk_ext.cpp`; HiPO has its own frontal BK kernel.

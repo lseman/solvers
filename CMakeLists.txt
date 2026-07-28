@@ -140,7 +140,7 @@ if(WITH_BLAS)
 endif()
 
 if(BUILD_OSPQ)
-    nanobind_add_module(osqp_ext python/osqp_ext.cpp)
+    nanobind_add_module(osqp_ext python/bindings/optimization/osqp_ext.cpp)
     target_link_libraries(osqp_ext PRIVATE solvers_headers)
     set_target_properties(
         osqp_ext
@@ -152,7 +152,7 @@ if(BUILD_OSPQ)
 endif()
 
 if(BUILD_PIQP)
-    nanobind_add_module(piqp_ext python/piqp_ext.cpp)
+    nanobind_add_module(piqp_ext python/bindings/optimization/piqp_ext.cpp)
     target_link_libraries(piqp_ext PRIVATE solvers_headers)
     set_target_properties(
         piqp_ext
@@ -164,7 +164,7 @@ if(BUILD_PIQP)
 endif()
 
 if(BUILD_QP)
-    nanobind_add_module(qp_ext python/qp_ext.cpp)
+    nanobind_add_module(qp_ext python/bindings/optimization/qp_ext.cpp)
     target_link_libraries(qp_ext PRIVATE solvers_headers)
     set_target_properties(
         qp_ext
@@ -176,7 +176,7 @@ if(BUILD_QP)
 endif()
 
 if(BUILD_QDLDL)
-    nanobind_add_module(qdldl_ext python/qdldl_ext.cpp)
+    nanobind_add_module(qdldl_ext python/bindings/linear_system/qdldl_ext.cpp)
     target_link_libraries(qdldl_ext PRIVATE solvers_headers)
     if(WITH_HIGHWAY)
         target_compile_definitions(qdldl_ext PRIVATE LDLT_WITH_HIGHWAY)
@@ -193,7 +193,7 @@ if(BUILD_QDLDL)
 endif()
 
 if(BUILD_LDLT)
-    nanobind_add_module(ldlt_ext python/ldlt_ext.cpp)
+    nanobind_add_module(ldlt_ext python/bindings/linear_system/ldlt_ext.cpp)
     target_link_libraries(ldlt_ext PRIVATE solvers_headers)
     if(WITH_HIGHWAY)
         target_compile_definitions(ldlt_ext PRIVATE LDLT_WITH_HIGHWAY)
@@ -208,7 +208,7 @@ if(BUILD_LDLT)
     )
     list(APPEND SOLVER_TARGETS ldlt_ext)
 
-    nanobind_add_module(ldlt_bk_ext python/ldlt_bk_ext.cpp)
+    nanobind_add_module(ldlt_bk_ext python/bindings/linear_system/ldlt_bk_ext.cpp)
     target_link_libraries(ldlt_bk_ext PRIVATE solvers_headers)
     if(WITH_HIGHWAY)
         target_compile_definitions(ldlt_bk_ext PRIVATE LDLT_WITH_HIGHWAY)
@@ -225,7 +225,11 @@ if(BUILD_LDLT)
 endif()
 
 if(BUILD_KLU)
-    nanobind_add_module(klu_ext python/klu_ext.cpp linear_system/klu/klu_impl.cpp)
+    nanobind_add_module(
+        klu_ext
+        python/bindings/linear_system/klu_ext.cpp
+        linear_system/klu/klu_impl.cpp
+    )
     target_link_libraries(klu_ext PRIVATE solvers_headers)
     set_target_properties(
         klu_ext
@@ -239,7 +243,7 @@ endif()
 if(BUILD_IPM)
     nanobind_add_module(
         ipm_ext
-        python/ipm_module.cpp
+        python/bindings/optimization/ipm_module.cpp
         src/ipm/ip_solver.cpp
         # src/ipm/ipm_linear_solver.cpp
     )
@@ -255,7 +259,7 @@ if(BUILD_IPM)
 endif()
 
 if(BUILD_PDLP)
-    nanobind_add_module(pdlp_ext python/pdlp_ext.cpp)
+    nanobind_add_module(pdlp_ext python/bindings/optimization/pdlp_ext.cpp)
     target_link_libraries(pdlp_ext PRIVATE solvers_headers)
     if(WITH_CUDA)
         enable_language(CUDA)
@@ -285,7 +289,7 @@ if(BUILD_PDLP)
 endif()
 
 if(BUILD_PROXQP)
-    nanobind_add_module(proxqp_ext python/proxqp_ext.cpp)
+    nanobind_add_module(proxqp_ext python/bindings/optimization/proxqp_ext.cpp)
     target_link_libraries(proxqp_ext PRIVATE solvers_headers)
     set_target_properties(
         proxqp_ext
@@ -297,31 +301,42 @@ if(BUILD_PROXQP)
 endif()
 
 if(BUILD_SUPERSONAL)
-    nanobind_add_module(supernodal_ext python/supernodal_ext.cpp)
+    nanobind_add_module(
+        supernodal_ext
+        python/bindings/linear_system/supernodal_ext.cpp
+    )
     target_link_libraries(supernodal_ext PRIVATE solvers_headers)
     set_target_properties(
         supernodal_ext
         PROPERTIES
         OUTPUT_NAME supernodal
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/solvers
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     list(APPEND SOLVER_TARGETS supernodal_ext)
 
-    nanobind_add_module(supernodes_ext python/supernodes_ext.cpp)
+    nanobind_add_module(
+        supernodes_ext
+        python/bindings/linear_system/supernodes_ext.cpp
+    )
     target_link_libraries(supernodes_ext PRIVATE solvers_headers)
     set_target_properties(
         supernodes_ext
         PROPERTIES
         OUTPUT_NAME supernodes
-        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/solvers
+        LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}
     )
     list(APPEND SOLVER_TARGETS supernodes_ext)
 endif()
 
 if(SOLVER_TARGETS)
-    install(TARGETS ${SOLVER_TARGETS} LIBRARY DESTINATION solvers)
+    install(TARGETS ${SOLVER_TARGETS} LIBRARY DESTINATION .)
 endif()
-install(FILES python/solvers/__init__.py DESTINATION solvers)
+install(
+    DIRECTORY python/obp
+    DESTINATION .
+    FILES_MATCHING
+    PATTERN "*.py"
+)
 
 if(BUILD_SOLVER_TESTS)
     enable_testing()

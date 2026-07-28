@@ -11,7 +11,7 @@ from pathlib import Path
 _project_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_project_root / "python"))
 
-from solvers.obp import (
+from obp import (
     Problem,
     Variable,
     solve,
@@ -159,7 +159,7 @@ def example_expression_api():
     print("Example 6: Expression API")
     print("=" * 60)
 
-    from solvers.obp.expression import Expression
+    from obp.expression import Expression
 
     x = Expression.from_variable(Variable(0, "x"))
     y = Expression.from_variable(Variable(1, "y"))
