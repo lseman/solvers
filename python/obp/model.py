@@ -15,7 +15,10 @@ import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
+import numpy as np
+
 from .expression import Expression
+from .matrices import build_symmetric_P, build_constraints_matrix
 from .sos import SOSConstraint
 
 if TYPE_CHECKING:
@@ -159,6 +162,47 @@ class Variable:
     def __hash__(self) -> int:
         return hash(self._id)
 
+    # -- NumPy ufunc dispatch (array broadcasting) --------------------------
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        """Dispatch NumPy universal functions to element-wise Python ops.
+
+        Enables ``np.array([x, y, z]) + 3`` to broadcast over the object array,
+        returning an object array of :class:`Expression` objects.
+        """
+        import numpy as np
+
+        if method == "__call__":
+            if len(inputs) == 1:
+                if ufunc is np.negative:
+                    return -self
+            elif len(inputs) == 2:
+                a, b = inputs
+                if isinstance(a, (int, float)) and isinstance(b, Variable):
+                    if ufunc is np.add:
+                        return Expression.from_variable(b) + Expression.constant(float(a))
+                    elif ufunc is np.subtract:
+                        return Expression.constant(float(a)) - b
+                    elif ufunc is np.multiply:
+                        return Expression.from_variable(b) * float(a)
+                elif isinstance(a, Variable) and isinstance(b, (int, float)):
+                    if ufunc is np.add:
+                        return Expression.from_variable(a) + Expression.constant(float(b))
+                    elif ufunc is np.subtract:
+                        return Expression.from_variable(a) - Expression.constant(float(b))
+                    elif ufunc is np.multiply:
+                        return Expression.from_variable(a) * float(b)
+                elif isinstance(a, Variable) and isinstance(b, Variable):
+                    if ufunc is np.add:
+                        return Expression.from_variable(a) + Expression.from_variable(b)
+                    elif ufunc is np.subtract:
+                        return Expression.from_variable(a) - Expression.from_variable(b)
+                    elif ufunc is np.multiply:
+                        return Expression._from_raw({}, [(a, b, 1.0)])
+        if "out" in kwargs:
+            return NotImplemented
+        return NotImplemented
+
 
 class IntVar(Variable):
     """Integer variable (lb <= x <= ub, x in Z)."""
@@ -275,6 +319,9 @@ class Problem:
         self._constraints: list[Constraint] = []
         self._soc_constraints: list[_SOCPConstraint] = []
         self._sos_constraints: list[SOSConstraint] = []
+        # --- DPP cache: keyed by (solver, param_fingerprint) → assembled matrices ---
+        self._cache: dict[tuple, dict] = {}
+        self._cache_enabled: bool = True  # default on, toggle with enable_caching()
 
     @property
     def n_vars(self) -> int:
@@ -706,3 +753,317 @@ class Problem:
                 for c in self._constraints
             ],
         }
+
+    # --- DPP cache control ---------------------------------------------------
+
+    def clear_cache(self) -> None:
+        """Clear the DPP assemble cache.
+
+        Call after mutating Parameters if you want to force a rebuild
+        on the next :func:`~obp.solve()`.
+        """
+        self._cache.clear()
+
+    def enable_caching(self, enabled: bool = True) -> None:
+        """Enable or disable DPP caching for this Problem.
+
+        Parameters:
+            enabled: Whether to cache assembled matrices between solves.
+        """
+        self._cache_enabled = enabled
+
+    def get_cache_stats(self) -> dict:
+        """Return cache statistics: size, enabled.
+
+        Returns:
+            Dict with ``'size'`` (number of cached entries) and
+            ``'enabled'`` (boolean).
+        """
+        return {"size": len(self._cache), "enabled": self._cache_enabled}
+
+    # --- get_problem_data (CVXPY-style standard form extraction) ------------
+
+    def get_problem_data(
+        self,
+        solver: str | None = None,
+    ) -> tuple[dict, dict]:
+        """Extract canonical problem data for external solvers.
+
+        Returns a (data, inverse_data) tuple where:
+        - **data** is a dict with keys matching each solver's expected
+          problem data (see :func:`~obp.solve` dispatch logic).
+        - **inverse_data** is a dict with keys needed to unpack a
+          solution back into :class:`Solution` format.
+
+        The data dict always contains the canonical keys::
+
+            data = {
+                "P": scipy_sparse | None,   # 0.5 x^T P x in objective
+                "c": np.ndarray,            # linear objective coefficients
+                "A": scipy_sparse,          # constraint matrix
+                "l": np.ndarray,            # lower bounds on Ax
+                "u": np.ndarray,            # upper bounds on Ax
+                "sense": np.ndarray,        # sense vector (=1, >=-1, <=0)
+                "lb": np.ndarray,           # variable lower bounds
+                "ub": np.ndarray,           # variable upper bounds
+                "var_types": np.ndarray,    # 0=cont, 1=int, 2=binary
+                "obj_offset": float,        # constant in objective
+                "obj_sense": str,           # "minimize" or "maximize"
+                "row_constraints": list,    # Constraint objects per row
+                "soc_constraints": list,    # SOC constraints
+                "sos_constraints": list,    # SOS constraints
+                "n_vars": int,
+                "n_constraints": int,
+            }
+
+        Parameters:
+            solver: Solver name (optional; affects formatting in the
+                returned data dict when solver-specific transforms are
+                applied). Pass ``None`` for canonical form.
+
+        Returns:
+            (data, inverse_data) tuple.
+
+        Example::
+
+            pb = Problem()
+            x = pb.add_variables("x", 3, lb=0)
+            pb.set_objective(x[0]**2 + x[1]**2 + x[2]**2)
+            pb.add_constraint(x[0] + x[1] + x[2] == 4)
+
+            data, inv = pb.get_problem_data()
+            # data["A"], data["c"], data["P"], ... are ready to pass to
+            # a solver that speaks the canonical form.
+        """
+        obj, sense, constraints, soc_constraints, variables = self.assemble()
+        sos_constraints = self._sos_constraints
+
+        if solver is not None:
+            from .solve import _detect_solver, _compute_cache_key, _param_fingerprint
+            # Compute cache key to get assembled matrices (same path as solve())
+            cache_key = _compute_cache_key(
+                self, solver, obj, constraints, soc_constraints, sos_constraints
+            )
+            cached = self._cache.get(cache_key) if self._cache_enabled else None
+            if cached is None:
+                # Assemble once to get the canonical data
+                n_vars = len(variables)
+                obj_sign = -1.0 if sense == "maximize" else 1.0
+                obj_offset = obj.resolved_constant
+                lb = np.array([v.lb for v in variables], dtype=np.float64)
+                ub = np.array([v.ub for v in variables], dtype=np.float64)
+                var_types = np.array(
+                    [0 if v.vtype == "continuous" else 1 if v.vtype == "integer" else 2
+                     for v in variables],
+                    dtype=np.int64,
+                )
+                if obj.is_linear:
+                    obj_rows, obj_cols, obj_vals = obj.to_linear_arrays(n_vars)
+                    c = np.zeros(n_vars, dtype=np.float64)
+                    for col, val in zip(obj_cols, obj_vals):
+                        c[col] = val
+                    P = None
+                else:
+                    q_rows, q_cols, q_vals = obj.to_linear_arrays(n_vars)
+                    c = np.zeros(n_vars, dtype=np.float64)
+                    for col, val in zip(q_cols, q_vals):
+                        c[col] = val
+                    P = build_symmetric_P(*obj.to_quadratic_arrays(n_vars), n_vars)
+                A_constr, l, u, sense_vec, row_constraints = build_constraints_matrix(
+                    constraints, n_vars
+                )
+            else:
+                c = cached["c"]
+                P = cached["P"]
+                A_constr = cached["A_constr"]
+                l = cached["l"]
+                u = cached["u"]
+                sense_vec = cached["sense_vec"]
+                row_constraints = cached["row_constraints"]
+                lb = cached["lb"]
+                ub = cached["ub"]
+                var_types = cached["var_types"]
+                obj_offset = cached["obj_offset"]
+                n_vars = len(variables)
+        else:
+            # Canonical form: assemble fresh
+            n_vars = len(variables)
+            obj_sign = -1.0 if sense == "maximize" else 1.0
+            obj_offset = obj.resolved_constant
+            lb = np.array([v.lb for v in variables], dtype=np.float64)
+            ub = np.array([v.ub for v in variables], dtype=np.float64)
+            var_types = np.array(
+                [0 if v.vtype == "continuous" else 1 if v.vtype == "integer" else 2
+                 for v in variables],
+                dtype=np.int64,
+            )
+            if obj.is_linear:
+                obj_rows, obj_cols, obj_vals = obj.to_linear_arrays(n_vars)
+                c = np.zeros(n_vars, dtype=np.float64)
+                for col, val in zip(obj_cols, obj_vals):
+                    c[col] = val
+                P = None
+            else:
+                q_rows, q_cols, q_vals = obj.to_linear_arrays(n_vars)
+                c = np.zeros(n_vars, dtype=np.float64)
+                for col, val in zip(q_cols, q_vals):
+                    c[col] = val
+                P = build_symmetric_P(*obj.to_quadratic_arrays(n_vars), n_vars)
+            A_constr, l, u, sense_vec, row_constraints = build_constraints_matrix(
+                constraints, n_vars
+            )
+
+        data = {
+            "P": P,
+            "c": c,
+            "A": A_constr,
+            "l": l,
+            "u": u,
+            "sense": sense_vec,
+            "lb": lb,
+            "ub": ub,
+            "var_types": var_types,
+            "obj_offset": obj_offset,
+            "obj_sense": sense,
+            "row_constraints": row_constraints,
+            "soc_constraints": soc_constraints,
+            "sos_constraints": sos_constraints,
+            "n_vars": n_vars,
+            "n_constraints": len(constraints),
+        }
+
+        inverse_data = {
+            "obj_sense": sense,
+            "obj_offset": obj_offset,
+            "variables": variables,
+            "row_constraints": row_constraints,
+        }
+
+        return data, inverse_data
+
+    # --- clone (deep-copy with fresh variables) -----------------------------
+
+    def clone(
+        self,
+        name: str | None = None,
+        x0: np.ndarray | None = None,
+    ) -> "Problem":
+        """Create a deep copy of this Problem with fresh Variable instances.
+
+        The cloned problem has identical structure (objective, constraints,
+        SOC/SOS) but all Variables are new objects with re-indexed positions.
+        This is useful for:
+
+        - **Warm-start**: solve the original, then clone and warm-start from
+          the original solution.
+        - **Scenario analysis**: create multiple copies of a problem with
+          different Parameter values or bounds.
+        - **Multi-start optimization**: clone and solve from different x0.
+
+        Parameters:
+            name: Optional name override for the clone. Defaults to
+                ``f"{self.name}_clone"`` (or just ``"clone"`` if self
+                has no name).
+            x0: Optional initial primal solution (passed to :func:`~obp.solve`
+                as a warm start). Not stored on the clone itself — it is
+                passed through to :func:`~obp.solve` when you call
+                ``solve(clone_pb, x0=x0)``.
+
+        Returns:
+            A new :class:`Problem` instance with identical structure.
+
+        Example::
+
+            pb = Problem("original")
+            x = pb.add_variables("x", 3, lb=0)
+            pb.set_objective(x[0]**2 + x[1]**2 + x[2]**2)
+            pb.add_constraint(x[0] + x[1] + x[2] == 4)
+
+            r1 = solve(pb, solver="osqp")
+            pb2 = pb.clone("warm_start")
+            r2 = solve(pb2, solver="osqp", x0=r1.x)  # warm start
+        """
+        import copy
+
+        clone_name = name or (f"{self.name}_clone" if self.name else "clone")
+        clone = Problem(name=clone_name)
+
+        # Build variable index mapping: old_variable -> new_variable
+        var_map: dict[Variable, Variable] = {}
+        for i, v in enumerate(self._variables):
+            new_v = Variable(
+                index=i,
+                name=v.name,
+                lb=v.lb,
+                ub=v.ub,
+                vtype=v.vtype,
+            )
+            var_map[v] = new_v
+            clone._variables.append(new_v)
+
+        # Deep-copy objective expression with variable mapping
+        if self._objective_expr is not None:
+            clone._objective_expr = _reindex_expression(
+                self._objective_expr, var_map
+            )
+        clone._objective_sense = self._objective_sense
+
+        # Deep-copy constraints with variable mapping
+        for c in self._constraints:
+            new_c = Constraint(
+                body=_reindex_expression(c.body, var_map),
+                sense=c.sense,
+                bound=c.bound,
+                name=c.name,
+            )
+            clone._constraints.append(new_c)
+
+        # Deep-copy SOC constraints with variable mapping
+        for soc in self._soc_constraints:
+            new_variables = [var_map.get(v, v) for v in soc.variables]
+            new_c = _SOCPConstraint(
+                variables=new_variables,
+                cone_indices=list(soc.cone_indices),
+                b=list(soc.b),
+                c={var_map.get(k, k): v for k, v in soc.c.items()},
+                d=soc.d,
+                name=soc.name,
+            )
+            clone._soc_constraints.append(new_c)
+
+        # Deep-copy SOS constraints with variable mapping
+        for sos in self._sos_constraints:
+            new_variables = [var_map.get(v, v) for v in sos.variables]
+            new_sos = SOSConstraint(
+                variables=new_variables,
+                type=sos.type,
+                weights=list(sos.weights) if sos.weights is not None else None,
+                method=sos.method,
+                name=sos.name,
+            )
+            clone._sos_constraints.append(new_sos)
+
+        # Clone does not inherit cache (fresh problem = fresh cache)
+        clone._cache = {}
+
+        return clone
+
+
+# --- Internal helpers --------------------------------------------------------
+
+def _reindex_expression(
+    expr: "Expression",
+    var_map: dict["Variable", "Variable"],
+) -> "Expression":
+    """Create a new Expression with Variables replaced according to *var_map*."""
+    from .expression import Expression
+
+    new_linear = {var_map.get(v, v): c for v, c in expr._linear.items()}
+    new_quad = [
+        (var_map.get(vi, vi), var_map.get(vj, vj), c)
+        for vi, vj, c in expr._quadratic
+    ]
+    new_param = {p: c for p, c in expr._param_linear.items()}
+    return Expression._from_raw(
+        new_linear, new_quad, expr._constant, new_param
+    )

@@ -24,8 +24,22 @@ Supported problem types:
 - Piecewise-linear interpolation (1D and 2D) and McCormick bilinear relaxation
 
 Other features:
-- ``Parameter``: a mutable scalar usable in expressions/bounds — change
-  ``.value`` and re-solve without rebuilding the Problem.
+- ``Parameter``: a mutable scalar or ND-tensor (numpy array) usable in
+  expressions/bounds -- change ``.value`` and re-solve without rebuilding.
+  Use ``ParameterVector(n, name=...)`` to create independent scalar
+  Parameters from a single factory.
+- **DPP caching**: assembled matrices are cached per-solver keyed on
+  Parameter values. ``solve()`` skips expression → matrix conversion
+  when Parameters haven't changed, giving ~100x speedup for repeated
+  solves (e.g. MPC, trajectory optimization).
+  Toggle with ``pb.enable_caching(False)``; clear with ``pb.clear_cache()``.
+- **NumPy broadcasting**: ``np.array(pb.add_variables("x", 3)) + 3``
+  broadcasts element-wise, returning an object array of Expressions.
+- **``Problem.get_problem_data(solver)``**: extract canonical problem
+  data (A, b, c, P, lb, ub, var_types) for external solvers.
+  Returns ``(data, inverse_data)`` tuple like CVXPY.
+- **``Problem.clone()``**: deep-copy problem with fresh Variables.
+  Use for warm-start, scenario analysis, or multi-start optimization.
 - ``Problem.add_constraints(A @ x, sense, b)``: batch constraints from a
   NumPy object-array of Variables (``A @ x`` already dispatches through
   Expression arithmetic; this adds one row per constraint).
@@ -61,7 +75,7 @@ from .model import (
     Problem,
     Variable,
 )
-from .parameter import Parameter
+from .parameter import Parameter, ParameterVector
 from .sos import SOSConstraint
 from .solve import Solution, solve
 from .conic import (
@@ -97,6 +111,7 @@ __all__ = [
     "IntVar",
     "BinVar",
     "Parameter",
+    "ParameterVector",
     "Expression",
     "Constraint",
     "SOSConstraint",

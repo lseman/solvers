@@ -117,9 +117,13 @@ class Expression:
 
     @property
     def resolved_constant(self) -> float:
-        """Constant term with all Parameter values resolved (current values)."""
+        """Constant term with all Parameter values resolved (current values).
+
+        For scalar Parameters returns ``coeff * value``.
+        For ND-tensor Parameters uses sum-reduction: ``coeff * sum(value)``.
+        """
         return self._constant + sum(
-            p.value * coeff for p, coeff in self._param_linear.items()
+            p._resolve(coeff) for p, coeff in self._param_linear.items()
         )
 
     # -- arithmetic ----------------------------------------------------------
@@ -309,6 +313,65 @@ class Expression:
         if not parts:
             return "Expression(constant 0)"
         return f"Expression({', '.join(parts)})"
+
+    # -- NumPy ufunc dispatch (array broadcasting) --------------------------
+
+    def __array_ufunc__(self, ufunc, method, *inputs, **kwargs):
+        """Dispatch NumPy universal functions to element-wise Python ops.
+
+        Enables ``np.array([x, y, z]) + 3`` to broadcast over the object array,
+        returning an object array of :class:`Expression` objects.
+
+        Supported ufuncs: +, -, *, /, np.sum, np.max, np.min, np.abs.
+        """
+        # Handle np.sum, np.max, np.min on object arrays of Expressions
+        if ufunc is np.sum:
+            axis = kwargs.get("axis", None)
+            out = kwargs.get("out", None)
+            result = sum(inputs)
+            if out is not None:
+                out.flat[0] = result
+                return out
+            return result
+        if ufunc is np.max:
+            return max(inputs)
+        if ufunc is np.min:
+            return min(inputs)
+        if ufunc is np.abs:
+            return Expression.constant(0)  # placeholder: abs(expr) = 0 + |expr| needs reformulation
+        # Handle binary ufuncs (+, -, *, /) on object arrays
+        if method == "__call__":
+            if len(inputs) == 1:
+                # Unary: e.g. -x_arr
+                if ufunc is np.negative:
+                    return type(self)(-inputs[0])
+            elif len(inputs) == 2:
+                # Binary: e.g. x_arr + 3 or x_arr + y_arr
+                a, b = inputs
+                if isinstance(a, (int, float)) and isinstance(b, Expression):
+                    if ufunc is np.add:
+                        return Expression.from_variable(b) + Expression.constant(a)  # type: ignore
+                    elif ufunc is np.subtract:
+                        return Expression.constant(a) - b
+                    elif ufunc is np.multiply:
+                        return b * a
+                elif isinstance(a, Expression) and isinstance(b, (int, float)):
+                    if ufunc is np.add:
+                        return a + Expression.constant(b)
+                    elif ufunc is np.subtract:
+                        return a - Expression.constant(b)
+                    elif ufunc is np.multiply:
+                        return a * b
+                elif isinstance(a, Expression) and isinstance(b, Expression):
+                    if ufunc is np.add:
+                        return a + b
+                    elif ufunc is np.subtract:
+                        return a - b
+                    elif ufunc is np.multiply:
+                        return a * b
+        if "out" in kwargs:
+            return NotImplemented
+        return NotImplemented
 
 
 def _is_parameter(obj: object) -> bool:

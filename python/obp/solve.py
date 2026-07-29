@@ -6,6 +6,18 @@ Auto-detect logic:
 - Quadratic objective + linear constraints → osqp (default QP solver)
 - Linear objective + general senses → ipm (LP/SOCP)
 - Integer/binary variables, or SOS1/SOS2 constraints → highs (MIP)
+
+DPP caching (Disciplined Parametrized Programming):
+When a Problem contains :class:`Parameter` objects, assembled matrices
+are cached keyed on the current Parameter values.  ``solve()`` checks
+the cache first — if Parameters haven't changed, the expensive expression
+to sparse-matrix conversion is skipped entirely.
+
+Cache lifetime: per-Problem.  Each ``Problem`` instance maintains its own
+``_cache`` dict with entries keyed by ``(solver_name, frozenset_of_param_values)``.
+Cache invalidates automatically when any Parameter value is written via
+``.value = ...`` (Parameters register with the Problem at construction
+via :meth:`Problem.add_variables` and :meth:`Problem.add_constraint`).
 """
 
 from __future__ import annotations
@@ -25,15 +37,64 @@ from .matrices import (
 )
 from .backends import get_backend, available_solvers
 from .sos.expand import expand_sos_constraints
+from .scaling import compute_col_scaling, apply_col_scaling, unscale_solution, unscale_duals
 
 if TYPE_CHECKING:
     from .model import Constraint, Problem, Variable
+
+
+# --- DPP cache helpers ---
+
+def _param_fingerprint(params: dict) -> tuple:
+    """Create a hashable fingerprint from Parameter values.
+
+    Returns a tuple of (name, dtype, shape, hash_of_value_bytes) for
+    each Parameter, enabling cache hits when values haven't changed.
+    """
+    items: list = []
+    for p, coeff in sorted(params.items(), key=lambda x: x[0].name or str(id(x[0]))):
+        val = p._value
+        items.append((p.name or str(id(p)), val.dtype, val.shape, hash(bytes(val.tobytes()))))
+    return tuple(items)
+
+
+def _compute_cache_key(
+    problem: Problem,
+    solver: str,
+    obj: Expression,
+    constraints: list,
+    soc_constraints: list,
+    sos_constraints: list,
+) -> tuple:
+    """Build the cache key for a Problem+Solver combination.
+
+    The key captures the problem structure plus all Parameter values
+    so that cache hits occur exactly when the solver would see
+    identical numerical data.
+    """
+    items: list = []
+    # Problem structure (invariant across solves)
+    items.append(("struct", len(problem._variables), len(problem._constraints),
+                   len(soc_constraints), len(sos_constraints)))
+    items.append(("obj_is_quad", obj.is_quadratic))
+    items.append(("obj_const", obj._constant))
+    items.append(("obj_param", _param_fingerprint(obj._param_linear)))
+    items.append(("obj_quad", len(obj._quadratic)))
+    
+    # Constraints
+    for c in constraints:
+        items.append(("con", c.sense, c.bound,
+                       _param_fingerprint(getattr(c.body, '_param_linear', {}))))
+    
+    items.append(("solver", solver))
+    return tuple(items)
 
 
 __all__ = [
     "Solution",
     "solve",
     "available_solvers",
+    "_pick_mip_solver",
 ]
 
 
@@ -112,24 +173,25 @@ def _detect_solver(
     """Auto-detect the best solver from problem structure.
 
     Checks solver availability and falls back to the next best option.
+    Priority order: Gurobi (best MIP) → HiGHS (free MIP) → SCIP (academic).
 
     Returns:
-        Solver name: "highs", "osqp", "piqp", "proxqp", "ipm".
+        Solver name: "gurobi", "highs", "scip", "osqp", "piqp", "proxqp", "ipm".
     """
-    # MIP check — HiGHS handles MIP
+    # MIP check — prefer Gurobi, then HiGHS, then SCIP
     has_mip = any(v.vtype in ("integer", "binary") for v in variables)
 
-    # SOCP check
+    # SOCP check — prefer HiGHS (built-in conic), then SCIP, then Gurobi
     if soc_constraints:
-        return "highs"  # HiGHS supports SOCP via conic
+        return _pick_mip_solver()
 
-    # SOS1/SOS2 → HiGHS (reformulated as MIP)
+    # SOS1/SOS2 → MIP reformulation
     if sos_constraints:
-        return "highs"
+        return _pick_mip_solver()
 
-    # MIP → HiGHS
+    # MIP → prefer Gurobi > HiGHS > SCIP
     if has_mip:
-        return "highs"
+        return _pick_mip_solver()
 
     # QP vs LP
     if obj.is_quadratic:
@@ -138,6 +200,27 @@ def _detect_solver(
 
     # LP — IPM handles LP with general senses
     return "ipm"
+
+
+def _pick_mip_solver() -> str:
+    """Pick the best available MIP solver.
+
+    Priority: Gurobi (best performance) → HiGHS (free, MIT) → SCIP (academic).
+    Returns the first solver that can be imported successfully.
+    """
+    for name, import_fn in [
+        ("gurobi", lambda: __import__("gurobipy")),
+        ("highs", lambda: __import__("highspy")),
+        ("scip", lambda: __import__("pyscipopt")),
+    ]:
+        try:
+            import_fn()  # noqa: F841
+            return name
+        except ImportError:
+            continue
+    raise RuntimeError(
+        "No MIP solver available — install one of: gurobipy, highspy, or pyscipopt"
+    )
 
 
 def _expand_soc_for_ipm(
@@ -225,18 +308,90 @@ def solve(
 
     n_vars = len(variables)
 
+    # --- DPP cache check ---
+    cache_key = _compute_cache_key(
+        problem, solver, obj, constraints, soc_constraints, sos_constraints
+    )
+    cached = None
+    _use_cache = (
+        problem._cache_enabled
+        and cache_key in problem._cache
+    )
+
     # Handle maximize: negate objective (obj_val is un-negated before returning)
     obj_sign = -1.0 if sense == "maximize" else 1.0
     if sense == "maximize":
         obj = obj * (-1)
+
+    if _use_cache:
+        cached = problem._cache[cache_key]
+    else:
+        cached = None
 
     # Backends only see the linear/quadratic parts; the constant offset
     # (including any Parameter values) is added back into obj_val here.
     # Only applied to successful solutions — infeasible/unbounded are
     # returned with the raw solver objective (plus sign flip) so the
     # offset doesn't corrupt the reported value.
-    obj_offset = obj.resolved_constant
+    if cached is not None:
+        c = cached["c"]
+        P = cached["P"]
+        A_constr = cached["A_constr"]
+        l = cached["l"]
+        u = cached["u"]
+        sense_vec = cached["sense_vec"]
+        row_constraints = cached["row_constraints"]
+        lb = cached["lb"]
+        ub = cached["ub"]
+        var_types = cached["var_types"]
+        obj_offset = cached["obj_offset"]
+    else:
+        obj_offset = obj.resolved_constant
 
+        # Extract variable bounds and types
+        lb = np.array([v.lb for v in variables], dtype=np.float64)
+        ub = np.array([v.ub for v in variables], dtype=np.float64)
+        var_types = np.array(
+            [0 if v.vtype == "continuous" else 1 if v.vtype == "integer" else 2
+             for v in variables],
+            dtype=np.int64,
+        )
+
+        # Extract objective coefficients
+        if obj.is_linear:
+            obj_rows, obj_cols, obj_vals = obj.to_linear_arrays(n_vars)
+            c = np.zeros(n_vars, dtype=np.float64)
+            for col, val in zip(obj_cols, obj_vals):
+                c[col] = val
+            P = None  # No quadratic part
+        else:
+            # Quadratic objective
+            q_rows, q_cols, q_vals = obj.to_linear_arrays(n_vars)
+            c = np.zeros(n_vars, dtype=np.float64)
+            for col, val in zip(q_cols, q_vals):
+                c[col] = val
+            P = build_symmetric_P(*obj.to_quadratic_arrays(n_vars), n_vars)
+
+        # Extract constraint matrix
+        A_constr, l, u, sense_vec, row_constraints = build_constraints_matrix(constraints, n_vars)
+
+        # Store in cache (only when cache is enabled)
+        if problem._cache_enabled:
+            problem._cache[cache_key] = {
+                "c": c,
+                "P": P,
+                "A_constr": A_constr,
+                "l": l,
+                "u": u,
+                "sense_vec": sense_vec,
+                "row_constraints": row_constraints,
+                "lb": lb,
+                "ub": ub,
+                "var_types": var_types,
+                "obj_offset": obj_offset,
+            }
+
+    # Helper closures for obj_offset handling (always needed, regardless of cache)
     def _apply_offset(obj_val: float, status: str) -> float:
         """Add sign-flipped offset only for successful solutions."""
         if status in ("solved", "optimal", "OPT"):
@@ -248,33 +403,6 @@ def solve(
         if status not in ("solved", "optimal", "OPT"):
             return np.zeros_like(y_arr) * np.nan
         return y_arr
-
-    # Extract variable bounds and types
-    lb = np.array([v.lb for v in variables], dtype=np.float64)
-    ub = np.array([v.ub for v in variables], dtype=np.float64)
-    var_types = np.array(
-        [0 if v.vtype == "continuous" else 1 if v.vtype == "integer" else 2
-         for v in variables],
-        dtype=np.int64,
-    )
-
-    # Extract objective coefficients
-    if obj.is_linear:
-        obj_rows, obj_cols, obj_vals = obj.to_linear_arrays(n_vars)
-        c = np.zeros(n_vars, dtype=np.float64)
-        for col, val in zip(obj_cols, obj_vals):
-            c[col] = val
-        P = None  # No quadratic part
-    else:
-        # Quadratic objective
-        q_rows, q_cols, q_vals = obj.to_linear_arrays(n_vars)
-        c = np.zeros(n_vars, dtype=np.float64)
-        for col, val in zip(q_cols, q_vals):
-            c[col] = val
-        P = build_symmetric_P(*obj.to_quadratic_arrays(n_vars), n_vars)
-
-    # Extract constraint matrix
-    A_constr, l, u, sense_vec, row_constraints = build_constraints_matrix(constraints, n_vars)
 
     # Variable bounds are separate from constraint bounds.
     # For OSQP/PIQP: we encode variable bounds as extra rows in the constraint matrix.
@@ -304,11 +432,29 @@ def solve(
             l_full = np.array([], dtype=np.float64)
             u_full = np.array([], dtype=np.float64)
 
+        # --- Auto-scale (column scaling, continuous only) ---
+        is_continuous = bool(np.all(var_types == 0))
+        scale_factors = None
+
+        if is_continuous and A_full.nnz > 0:
+            scale_factors = compute_col_scaling(A_full, P, lb, ub)
+            A_scaled, P_scaled, c = apply_col_scaling(A_full, P, c, scale_factors)
+            A_full = A_scaled
+            P = P_scaled
+
         result = backend.solve(  # type: ignore[union-attr]
             P.tocsc(), c, A_full.tocsc(), l_full, u_full, **options
         )
 
+        # --- Unscale solution and duals ---
+        x = np.array(result["x"])
+        if scale_factors is not None:
+            x = unscale_solution(x, scale_factors)
+
         y_arr = np.array(result.get("y", []))
+        if scale_factors is not None:
+            y_arr = unscale_duals(y_arr, scale_factors, len(row_constraints))
+
         dual_map = {
             id(rc): float(y_arr[i])
             for i, rc in enumerate(row_constraints)
@@ -316,7 +462,7 @@ def solve(
         }
 
         return Solution(
-            x=np.array(result["x"]),
+            x=x,
             obj_val=_apply_offset(result["obj_val"], result["status"]),
             status=result["status"],
             solver=solver,
@@ -335,12 +481,22 @@ def solve(
             constraints, n_vars
         )
 
+        # --- Auto-scale (column scaling, continuous only) ---
+        # NOTE: Column scaling for split-constraint solvers (PIQP/ProxQP) is
+        # tricky because both P and the constraint matrices need consistent
+        # scaling.  Skipping for now — use OSQP for QP or IPM for LP.
+        scale_factors = None
+
         result = backend.solve(  # type: ignore[union-attr]
             P.tocsc(), c, A_eq, b_eq, G_ineq, h_ineq, **options
         )
 
+        x = np.array(result["x"])
+        if scale_factors is not None:
+            x = unscale_solution(x, scale_factors)
+
         return Solution(
-            x=np.array(result["x"]),
+            x=x,
             obj_val=_apply_offset(result["obj_val"], result["status"]),
             status=result["status"],
             solver=solver,
@@ -361,12 +517,21 @@ def solve(
             constraints, n_vars
         )
 
+        # --- Auto-scale (column scaling, continuous only) ---
+        # NOTE: Column scaling for split-constraint solvers (ProxQP) has the
+        # same issue as PIQP.  Skipping for now.
+        scale_factors = None
+
         result = backend.solve(  # type: ignore[union-attr]
             H.tocsc(), c, A_eq, b_eq, C_ineq, l_ineq, u_ineq, **options
         )
 
+        x = np.array(result["x"])
+        if scale_factors is not None:
+            x = unscale_solution(x, scale_factors)
+
         return Solution(
-            x=np.array(result["x"]),
+            x=x,
             obj_val=_apply_offset(result["obj_val"], result["status"]),
             status=result["status"],
             solver=solver,
@@ -379,12 +544,6 @@ def solve(
     elif solver == "ipm":
         # IPM: min c^T x, lb <= x <= ub, sense-based constraints
         if P is not None:
-            # QP via IPM: add P to c (gradient of 0.5 x^T P x is Px)
-            # Actually, IPM solver handles QP via its internal P matrix
-            # For now, pass P through as part of the problem
-            # The IPM backend needs to accept P for QP
-            # Re-assemble: IPM solve_ipm accepts A, b, c, lb, ub, sense
-            # For QP, we need to pass P separately — check if IPM supports it
             raise NotImplementedError(
                 "QP via IPM: P matrix support pending. "
                 "Use solver='osqp' for QP problems."
@@ -399,14 +558,29 @@ def solve(
             b_full = np.array([], dtype=np.float64)
         else:
             sense_full = sense_vec
-            # b is the per-row RHS: <= uses u, >= uses l, == has l == u.
             b_full = np.where(sense_vec == 0.0, u, l)
+
+        # --- Auto-scale (column scaling, continuous only) ---
+        is_continuous = bool(np.all(var_types == 0))
+        scale_factors = None
+
+        if is_continuous and A_full.nnz > 0:
+            scale_factors = compute_col_scaling(A_full, None, lb, ub)
+            A_scaled, _, c = apply_col_scaling(A_full, None, c, scale_factors)
+            A_full = A_scaled
 
         result = backend.solve(  # type: ignore[union-attr]
             A_full, b_full, c, lb, ub, sense_full, **options
         )
 
+        x = np.array(result["x"])
+        if scale_factors is not None:
+            x = unscale_solution(x, scale_factors)
+
         y_arr = np.array(result.get("y", []))
+        if scale_factors is not None:
+            y_arr = unscale_duals(y_arr, scale_factors, len(row_constraints))
+
         dual_map = {
             id(rc): float(y_arr[i])
             for i, rc in enumerate(row_constraints)
@@ -414,7 +588,7 @@ def solve(
         }
 
         return Solution(
-            x=np.array(result["x"]),
+            x=x,
             obj_val=_apply_offset(result["obj_val"], result["status"]),
             status=result["status"],
             solver=solver,
